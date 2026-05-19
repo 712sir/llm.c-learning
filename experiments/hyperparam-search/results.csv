@@ -1,0 +1,5 @@
+experiment,config,train_loss,val_loss,time_seconds,notes
+baseline,block_size=64,,,,
+exp1,block_size=32,,,,
+exp2,n_layer=2,,,,
+exp3,lr=3e-3,,,,

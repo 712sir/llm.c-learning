@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# CUDA / C
+*.o
+*.out
+*.exe
+*.dll
+*.so
+*.a
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data files (large binaries)
+*.bin
+*.safetensors
+*.pt
+*.pth
+
+# WandB
+wandb/
+
+# Logs
+*.log
+logs/
+
+# Output
+out*/
+ckpt*/
+__assets*/
