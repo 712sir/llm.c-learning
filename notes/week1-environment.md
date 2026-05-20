@@ -142,13 +142,81 @@ python train.py config/train_shakespeare_char.py \
     --max_iters=100 \
     --batch_size=4 \
     --block_size=64 \
-    --eval_interval=50
+    --eval_interval=50 \
+    --compile=False
 ```
 
 ### 训练结果
-- 最终 train loss：________
-- 最终 val loss：________
-- 100 步耗时：________
+- 最终 train loss：2.7108
+- 最终 val loss：2.7131
+- 100 步耗时：~14s（每步约 20ms，eval 步约 4s × 3 次）
+- 模型参数量：10.65M
+- 每步 tokens：256
+
+### 踩坑记录
+
+**问题：torch.compile 需要 Triton，Windows 不支持**
+- **现象**：`RuntimeError: Cannot find a working triton installation`
+- **原因**：nanoGPT train.py 默认 `compile=True`，torch.compile 在 GPU 上调用 inductor 后端需要 Triton，但 Triton 官方仅支持 Linux
+- **解决**：添加 `--compile=False` 禁用编译，GTX 1650 仅 4GB 显存，后续大模型也无暇使用 compile 加速，影响可忽略
+
+---
+
+## Day 1：训练指令详解
+
+### 命令逐条拆解
+
+```bash
+python train.py config/train_shakespeare_char.py \
+    --max_iters=100 \
+    --batch_size=4 \
+    --block_size=64 \
+    --eval_interval=50 \
+    --compile=False
+```
+
+| 参数 | 值 | 含义 |
+|------|-----|------|
+| `config/train_shakespeare_char.py` | 配置文件 | 基础配置：6层 transformer，6头注意力，384维嵌入，原始设定 batch_size=64、block_size=256、max_iters=5000，本次全部用命令行覆盖 |
+| `--max_iters=100` | 100 步 | 只跑 100 步（完整训练是 5000），仅验证流程能走通 |
+| `--batch_size=4` | 4 | 每次拿 4 条样本并行。原配置是 64，降到 4 是因为 GTX 1650 只有 4GB 显存 |
+| `--block_size=64` | 64 | 每条样本的上下文窗口 = 64 个字符。原配置 256，同样为省显存 |
+| `--eval_interval=50` | 50 | 每 50 步做一次验证集评估，本次在 step 0/50/100 各评估一次 |
+| `--compile=False` | 关闭 | Windows 无 Triton，禁用 torch.compile |
+
+### 每步发生了什么
+
+每一步训练的数据量 = `batch_size × block_size = 4 × 64 = 256 tokens`。模型用这 256 个 token 做一次**前向传播**（计算 logits → 算 loss）→ **反向传播**（算梯度）→ **参数更新**（AdamW 优化器更新 10.65M 参数）。
+
+---
+
+## Day 1：结果评估
+
+### Loss 曲线
+
+```
+step 0:   train 4.3241 → val 4.3153    初始随机权重，loss ≈ ln(65) ≈ 4.17
+step 10:  loss 3.3288                   快速下降
+step 20:  loss 3.0446
+step 50:  train 2.7608 → val 2.7698
+step 100: train 2.7108 → val 2.7131
+```
+
+### 解读
+
+**1. 初始 loss 正常。** 词表大小 65（65 种字符），随机猜测的 loss 理论上限是 `ln(65) ≈ 4.17`。step 0 的 4.32 接近这个值，说明模型初始化正确，没有数值异常。
+
+**2. Loss 在持续下降。** 从 4.29 → 2.71，下降了约 38%，且没有反弹或震荡。说明学习率设置合理，梯度正常回传，没有梯度爆炸/消失。
+
+**3. 没有过拟合。** train loss (2.7108) 和 val loss (2.7131) 几乎一致。如果 train loss 远低于 val loss（比如 0.5 vs 3.0），说明模型在"背"训练集而非学习规律。目前两者非常接近，是健康信号。
+
+**4. 下降速度在放缓。** 前 20 步下降很快（4.29 → 3.04），后 80 步变慢（3.04 → 2.71）。这是正常现象——模型先学到高频模式（空格、常见字母 e/t/a/o），后学的规律越来越"贵"（罕见组合、长程依赖）。
+
+**5. 10.65M 参数跑 100 步远未收敛。** 这个模型设计是跑 5000 步的，100 步只是验证管线，loss 还有大量下降空间。
+
+### 结论
+
+> 环境搭建正确，模型能正常收敛。loss 下降曲线健康，train/val 一致无过拟合。可以进入 Day 2 的超参实验。
 
 ---
 
@@ -156,7 +224,7 @@ python train.py config/train_shakespeare_char.py \
 
 | 实验 | 配置变更 | train loss | val loss | 观察 |
 |------|---------|-----------|----------|------|
-| Baseline | block_size=64 | | | |
+| Baseline | block_size=64 | 2.7108 | 2.7131 | loss 正常下降，未过拟合 |
 | 实验1 | block_size=32 | | | |
 | 实验2 | n_layer=2 | | | |
 | 实验3 | lr=3e-3 | | | |
@@ -188,7 +256,7 @@ python train.py config/train_gpt2.py --max_iters=1000 --eval_interval=200
 
 ## 阶段检查清单
 
-- [ ] Shakespeare 数据集训练成功，loss 正常下降
+- [√] Shakespeare 数据集训练成功，loss 正常下降
 - [ ] OpenWebText 数据集训练成功
 - [ ] `sample.py` 能正常生成文本
 - [ ] 调整过至少 3 个超参数，记录了对 loss 的影响
