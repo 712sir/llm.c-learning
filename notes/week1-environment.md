@@ -7,7 +7,7 @@
 ### 硬件环境
 - GPU：NVIDIA GeForce GTX 1650
 - 显存：4 GB
-- CUDA 版本：12.4（驱动支持），**CUDA Toolkit 未安装**
+- CUDA 版本：12.4（驱动支持），CUDA Toolkit 暂缓至 Week 8
 - 驱动版本：552.12
 
 ### 软件环境
@@ -15,150 +15,129 @@
 | 工具 | 版本 | 路径/备注 |
 |------|------|-----------|
 | Python | 3.9.13 | `/d/ananconda3/python.exe`（conda） |
-| PyTorch | 2.0.1+cpu | **CPU 版，需升级为 CUDA 版** |
-| nvcc | ❌ 未安装 | 需安装 CUDA Toolkit |
-| gcc | ❌ 未安装 | 需安装 MinGW-w64 或 VS Build Tools |
-| make | ❌ 未安装 | 需安装 |
-| wandb | 0.26.1 | 需 `wandb login` |
+| PyTorch | 2.5.1+cu121 | CUDA 可用，GPU：GTX 1650 |
+| nvcc | ⏸️ 暂缓 | Week 8 安装 CUDA Toolkit 12.x |
+| gcc | 16.1.0 | `C:\mingw64\bin\gcc.exe`（MinGW-W64） |
+| make | 4.4.1 | `C:\mingw64\bin\mingw32-make.exe` |
+| wandb | 0.26.1 | 已登录 |
 
 ### 软件安装记录
 
 ```bash
 # ===== 1. 网络环境说明 =====
-# GitHub、PyPI 在国内直连超时，全程使用镜像/代理
-# GitHub 镜像：kkgithub.com（仅读），ssh.github.com:443（推送）
+# GitHub、PyPI 在国内直连超时，全程使用镜像
+# GitHub 拉取：kkgithub.com（只读镜像）
+# GitHub 推送：ssh.github.com:443（SSH over HTTPS）
 # PyPI 镜像：pypi.tuna.tsinghua.edu.cn
+# PyTorch CUDA wheel：mirrors.aliyun.com/pytorch-wheels/cu121（国内唯一可用）
 
-# ===== 2. 克隆项目（走 kkgithub 镜像）=====
+# ===== 2. 克隆项目 =====
 git clone --depth 1 https://kkgithub.com/karpathy/nanoGPT.git
 git clone --depth 1 https://kkgithub.com/karpathy/llm.c.git
-# 注意：kkgithub 是只读镜像，push 需走 SSH over 443
 
-# ===== 3. 安装依赖（走清华 PyPI 镜像）=====
-cd nanoGPT
-/d/ananconda3/python.exe -m pip install torch numpy transformers \
-    datasets tiktoken wandb \
-    -i https://pypi.tuna.tsinghua.edu.cn/simple \
-    --trusted-host pypi.tuna.tsinghua.edu.cn
+# ===== 3. 安装 Python 依赖 =====
+pip install torch numpy transformers datasets tiktoken wandb \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple
+# ⚠️ 清华源安装的是 CPU 版 PyTorch，需后续替换
 
-# 结果：PyTorch 安装的是 2.0.1+cpu（非 CUDA 版）
-# 解决方案：后续需卸载重装 CUDA 版 PyTorch
+# ===== 4. 替换 PyTorch CUDA 版 =====
+# 国内 PyPI 镜像（清华/阿里）都没有 CUDA 版 PyTorch
+# 阿里云有专用 PyTorch wheel 镜像，必须用 -f 参数（非 -i）
+pip uninstall torch -y
+pip install torch==2.5.1 -f https://mirrors.aliyun.com/pytorch-wheels/cu121
+# 版本选择：torch 2.5.1 是最后一个支持 Python 3.9 + CUDA 的版本
 
-# ===== 4. 编译 llm.c =====
-# ❌ 当前无法编译——缺少 gcc 和 make
-# 待办：安装 MinGW-w64 或 Visual Studio Build Tools
+# ===== 5. 安装 gcc + make =====
+winget install --id BrechtSanders.WinLibs.POSIX.UCRT --location "C:\mingw64"
+# winget 只下载了 ZIP，需手动解压：
+unzip -o winlibs-*.zip -d /c/mingw64/
+mv /c/mingw64/mingw64/* /c/mingw64/ && rmdir /c/mingw64/mingw64
+echo 'export PATH="/c/mingw64/bin:$PATH"' >> ~/.bashrc
+# ⚠️ Windows 下 make 命令是 mingw32-make
 
-# ===== 5. 配置 Git 推送（SSH over 443）=====
-# HTTPS 和 SSH 22 端口均被封
-# 解决方案：走 ssh.github.com:443
+# ===== 6. wandb 登录 =====
+wandb login <api-key>
+
+# ===== 7. Git 推送配置 =====
+# HTTPS 和 SSH 22 端口均被封，走 ssh.github.com:443
 git remote add origin ssh://git@ssh.github.com:443/712sir/llm.c-learning.git
+ssh-keyscan -p 443 ssh.github.com >> ~/.ssh/known_hosts
 git push -u origin master
-# 成功推送首次 commit
+
+# ===== 8. 验证环境 =====
+python -c "import torch; print(torch.cuda.is_available())"  # True
+gcc --version    # 16.1.0
+mingw32-make -v  # 4.4.1
 ```
 
 ---
 
-## 踩坑全记录（13 个问题）
+## 踩坑记录（13 → 8 个核心问题）
 
 ### 问题 1：GitHub HTTPS 克隆超时
 - **现象**：`Failed to connect to github.com port 443: Timed out`
 - **原因**：国内网络封锁 GitHub
 - **解决**：使用镜像 `kkgithub.com` 替代 `github.com`
-  ```bash
-  git clone --depth 1 https://kkgithub.com/karpathy/nanoGPT.git
-  ```
 
-### 问题 2：Gitee 镜像需要认证
-- **现象**：`could not read Username for 'https://gitee.com'`
-- **原因**：Gitee 公开镜像也需要登录
-- **解决**：放弃 Gitee，改用 kkgithub
+### 问题 2：镜像站大面积失效
+- **尝试过**：Gitee（需登录）、ghproxy.com（超时）、ghp.ci（DNS 失败）、gitclone.com（502）
+- **唯一可用**：`kkgithub.com`（域名替换），但只读不写
 
-### 问题 3：ghproxy / ghproxy.com / ghp.ci 均不可用
-- **现象**：连接超时或 DNS 解析失败
-- **原因**：这些第三方代理服务不稳定或已失效
-- **解决**：放弃代理方式，改用 kkgithub 域名替换
+### 问题 3：Python 路径缺失
+- **现象**：`No Python at ...\Python38\python.exe`
+- **原因**：Python 目录存在但 exe 被卸载
+- **解决**：换用 conda 自带的 Python `/d/ananconda3/python.exe`
 
-### 问题 4：gitclone.com 返回 502
-- **现象**：`The requested URL returned error: 502`
-- **原因**：服务端故障
-- **解决**：放弃
-
-### 问题 5：Python 路径缺失
-- **现象**：`No Python at 'C:\Users\21716\AppData\Local\Programs\Python\Python38\python.exe'`
-- **原因**：Python 目录存在但 exe 被移除/卸载
-- **解决**：使用 conda 自带的 Python `/d/ananconda3/python.exe`
-
-### 问题 6：pip 安装卡住无响应
-- **现象**：`pip install torch numpy ...` 运行数分钟无输出
-- **原因**：PyPI 官方源国内不可达
+### 问题 4：pip 安装卡住无响应
+- **现象**：`pip install` 运行数分钟无输出
+- **原因**：PyPI 官方源不可达
 - **解决**：换清华镜像 `-i https://pypi.tuna.tsinghua.edu.cn/simple`
 
-### 问题 7：PyTorch 安装为 CPU 版本
-- **现象**：`torch.cuda.is_available() → False`
-- **原因**：pip 默认安装 CPU-only 版本
-- **解决（待办）**：
+### 问题 5：PyTorch 始终安装 CPU 版
+- **现象**：`torch.cuda.is_available() → False`，反复重装无效
+- **原因**：国内 PyPI 镜像（清华/阿里）只有 CPU 版，不含 `+cu121` 后缀的 CUDA 版
+- **解决**：用阿里云 PyTorch wheel 专用镜像 + `-f` 参数（非 `-i`）
   ```bash
-  pip uninstall torch -y
-  pip install torch --index-url https://download.pytorch.org/whl/cu121 \
-      -i https://pypi.tuna.tsinghua.edu.cn/simple
+  pip install torch==2.5.1 -f https://mirrors.aliyun.com/pytorch-wheels/cu121
   ```
+- **额外坑**：torch 2.6+ 不再支持 Python 3.9，需锁定 2.5.1
 
-### 问题 8：CUDA Toolkit 未安装
-- **现象**：`nvcc: command not found`
-- **原因**：NVIDIA 驱动 552.12 只提供 CUDA 12.4 运行时，不含编译工具链
-- **解决（待办）**：下载安装 [CUDA Toolkit 12.x](https://developer.nvidia.com/cuda-downloads)
+### 问题 6：Git Push 完全不通
+- **现象**：HTTPS 被 reset，SSH 22 端口超时
+- **解决**：SSH over 443 → `ssh.github.com:443`
+- **附带问题**：Host key 验证失败 → `ssh-keyscan` 添加；公钥未上传 → GitHub Settings 添加 SSH Key
 
-### 问题 9：gcc 和 make 未安装
-- **现象**：无法编译 llm.c 的纯 C 版本
-- **原因**：Windows 环境没有 C 编译器
-- **解决（待办）**：
-  - 方案 A：安装 [MinGW-w64](https://www.mingw-w64.org/)
-  - 方案 B：安装 Visual Studio Build Tools + 用 `cl.exe`
+### 问题 7：conda 安装工具链全部超时
+- **现象**：`conda install` 一直 `Solving environment` 后失败
+- **原因**：conda 残留 `defaults` 源指向 `repo.anaconda.com`（被封）
+- **解决**：`conda config --remove channels defaults`，全部切清华源
+- **后记**：gcc/make 最终还是走 winget 装的，conda 的 m2w64 太慢
 
-### 问题 10：Git Push 走 HTTPS 被重置
-- **现象**：`Recv failure: Connection was reset`
-- **原因**：HTTPS 443 端口到 github.com 被 GFW 阻断
-- **解决**：改用 SSH over 443 端口走 `ssh.github.com`
-
-### 问题 11：SSH 默认端口 22 不通
-- **现象**：`ssh -T git@github.com` 超时
-- **原因**：SSH 22 端口也被封锁
-- **解决**：使用 GitHub 的 SSH-over-HTTPS 端点 `ssh.github.com:443`
-
-### 问题 12：SSH Host Key 验证失败
-- **现象**：`Host key verification failed`
-- **原因**：`ssh.github.com` 不在 `~/.ssh/known_hosts` 中
-- **解决**：
-  ```bash
-  ssh-keyscan -p 443 ssh.github.com >> ~/.ssh/known_hosts
-  ```
-
-### 问题 13：SSH Key 未添加到 GitHub
-- **现象**：`git@ssh.github.com: Permission denied (publickey)`
-- **原因**：本地 SSH 公钥未上传 GitHub
-- **解决**：在 https://github.com/settings/keys 添加 `~/.ssh/id_rsa.pub`
-- **注意**：添加后需在 GitHub 上创建仓库再 push
+### 问题 8：winget 装了 MinGW 但不生效
+- **现象**：`winget install WinLibs` 提示成功，但 `gcc` 找不到
+- **原因**：winget 只下载了 ZIP 到 Temp 目录，没有解压安装
+- **解决**：手动 unzip 到 `C:\mingw64`，注意 ZIP 内有两层 `mingw64/` 目录需 flatten
 
 ---
 
-## 环境遗留待办
+## Day 1：数据准备 + 首次训练
 
-- [ ] 安装 CUDA Toolkit（让 nvcc 可用）
-- [ ] 安装 gcc + make（编译 llm.c）
-- [ ] PyTorch CPU 版替换为 CUDA 版
-- [ ] `wandb login` 登录 Weights & Biases
-- [ ] 确认 `python data/shakespeare_char/prepare.py` 可正常运行 
-
----
-
-## Day 1-2：首次训练
-
-### Shakespeare 数据集训练
+### Shakespeare 数据集
 
 ```bash
-cd nanoGPT
+cd Project-nanoGPT
 python data/shakespeare_char/prepare.py
+```
 
+结果：
+- 总字符数：1,115,394
+- 词表大小：65（字符级）
+- 训练集：1,003,854 tokens
+- 验证集：111,540 tokens
+
+### 首次训练
+
+```bash
 python train.py config/train_shakespeare_char.py \
     --max_iters=100 \
     --batch_size=4 \
@@ -186,14 +165,10 @@ python train.py config/train_shakespeare_char.py \
 
 ## Day 3：换数据集 + 生成文本
 
-### OpenWebText 训练
-
 ```bash
 python data/openwebtext/prepare.py
 python train.py config/train_gpt2.py --max_iters=1000 --eval_interval=200
 ```
-
-### 文本生成效果
 
 | temperature | 生成效果 | 观察 |
 |-------------|---------|------|
