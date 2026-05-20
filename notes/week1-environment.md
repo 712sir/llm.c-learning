@@ -72,7 +72,7 @@ mingw32-make -v  # 4.4.1
 
 ---
 
-## 踩坑记录（13 → 8 个核心问题）
+## 踩坑记录
 
 ### 问题 1：GitHub HTTPS 克隆超时
 - **现象**：`Failed to connect to github.com port 443: Timed out`
