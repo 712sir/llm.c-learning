@@ -1,6 +1,6 @@
 # Week 1：环境搭建 + 首次训练
 
-> 状态：🟡 进行中
+> 状态：🟡 进行中（Day 1-2 完成，Day 3 待开始）
 
 ## Day 1：环境搭建
 
@@ -222,12 +222,69 @@ step 100: train 2.7108 → val 2.7131
 
 ## Day 2：超参实验
 
-| 实验 | 配置变更 | train loss | val loss | 观察 |
-|------|---------|-----------|----------|------|
-| Baseline | block_size=64 | 2.7108 | 2.7131 | loss 正常下降，未过拟合 |
-| 实验1 | block_size=32 | | | |
-| 实验2 | n_layer=2 | | | |
-| 实验3 | lr=3e-3 | | | |
+### 实验流程说明
+
+naoGPT 通过 `configurator.py` 支持命令行覆盖配置文件中的任意参数，格式为 `--key=value`。这意味着不需要修改配置文件，一条命令就能完成一次实验。
+
+**实验设计**：控制变量法。每次只改一个参数，其他保持不变，这样才能确定 loss 变化是由哪个参数引起的。
+
+**实验模板**（以 baseline 为例）：
+
+```bash
+cd Project-nanoGPT
+python train.py config/train_shakespeare_char.py \
+    --max_iters=100 \        # 只跑 100 步快速验证
+    --batch_size=4 \         # GTX 1650 4GB 显存限制
+    --block_size=64 \        # 上下文窗口
+    --eval_interval=50 \     # 每 50 步评估一次
+    --compile=False          # Windows 无 Triton
+```
+
+**改一个参数的实验**（以 block_size 为例）：
+
+```bash
+# 只改 --block_size=32，其余参数与 baseline 完全一致
+python train.py config/train_shakespeare_char.py \
+    --max_iters=100 --batch_size=4 --block_size=32 \
+    --eval_interval=50 --compile=False
+```
+
+**每次实验关注哪些输出**：
+
+| 指标 | 位置 | 含义 |
+|------|------|------|
+| train loss (step 100) | 输出倒数第二行 `step 100: train loss X` | 模型在训练集上的最终表现 |
+| val loss (step 100) | 同上 `val loss X` | 模型在验证集上的表现，判断过拟合 |
+| 收敛速度 | 观察 iter 0→100 的 loss 下降趋势 | 判断学习率是否合适 |
+| 震荡程度 | 相邻 iter 之间 loss 的波动幅度 | 判断学习率是否过大 |
+| 每步耗时 | `time XXms` | 判断模型规模对速度的影响 |
+| 参数量 | `number of parameters: X` | 确认模型结构变更生效 |
+
+**关键经验**：
+
+1. **一次只改一个变量**。如果同时改 block_size 和 lr，loss 变了你分不清是谁造成的。
+2. **固定随机种子不关键**（100 步太短影响不大），但必须保证 baseline 和实验用的是**同一个数据集**（Shakespeare）。
+3. **eval_interval 设密一点**（50 步一次）。100 步一共才 3 个评估点，已经够看了。
+4. **GTX 1650 4GB 显存是硬上限**。batch_size 最高到 4-6，再大就 OOM。
+
+| 实验 | 配置变更 | train loss | val loss | 每步耗时 | 参数量 | 观察 |
+|------|---------|-----------|----------|---------|--------|------|
+| Baseline | block_size=64, n_layer=6, lr=1e-3 | 2.7108 | 2.7131 | ~17ms | 10.65M | loss 平稳下降，train/val 一致 |
+| 实验1 | block_size=32 | 2.8735 | 2.8799 | ~16ms | 10.65M | loss 变差 0.16，震荡更大，上下文短导致预测更难 |
+| 实验2 | n_layer=2 | 2.7240 | 2.7220 | ~9ms | 3.57M | loss 略差 0.01，但速度快 2x，参数少 67% |
+| 实验3 | lr=3e-3 | 2.8119 | 2.8157 | ~17ms | 10.65M | loss 变差 0.10，震荡明显（2.67~2.93 跳动），学习率过大 |
+
+### 解读
+
+**实验1 (block_size=32)**：上下文窗口减半后，模型每次只看到 32 个字符，比 baseline 的 64 少了一半。Loss 从 2.71 升到 2.88，说明上下文信息对字符级语言模型很重要——需要足够的历史字符来预测下一个字符。另注意到 loss 波动更大（iter 70 的 2.83 vs iter 80 的 3.10），小上下文导致每个 batch 的梯度更不稳定。
+
+**实验2 (n_layer=2)**：从 6 层减到 2 层，参数量从 10.65M 降到 3.57M。Loss 只差了 0.01，几乎和 baseline 持平，但训练速度快了一倍（9ms vs 17ms）。这说明在 Shakespeare 这种小数据集上，深层的模型容量是过剩的——浅层模型也能学到差不多的表示。
+
+**实验3 (lr=3e-3)**：学习率提高 3 倍后，loss 震荡加剧（在 2.67 和 2.93 之间反复跳动），最终 loss 也比 baseline 差。说明 1e-3 的学习率对当前模型规模来说已经接近上限，再大会导致梯度更新过冲，模型难以收敛到好的局部最优。
+
+### 结论
+
+> Baseline (block_size=64, n_layer=6, lr=1e-3) 在当前配置下是最优的。降低 block_size 和升高 lr 都会损害收敛质量。降低 n_layer 用 67% 的参数换来了几乎相同的 loss，如果追求推理速度是一个好的取舍方向。
 
 ---
 
@@ -256,7 +313,8 @@ python train.py config/train_gpt2.py --max_iters=1000 --eval_interval=200
 
 ## 阶段检查清单
 
-- [√] Shakespeare 数据集训练成功，loss 正常下降
+- [x] Shakespeare 数据集训练成功，loss 正常下降
+- [x] 完成 3 组超参实验（block_size / n_layer / lr），记录分析
 - [ ] OpenWebText 数据集训练成功
 - [ ] `sample.py` 能正常生成文本
 - [ ] 调整过至少 3 个超参数，记录了对 loss 的影响
