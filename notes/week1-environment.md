@@ -1,6 +1,6 @@
 # Week 1：环境搭建 + 首次训练
 
-> 状态：🟡 进行中（Day 1-2 完成，Day 3 待开始）
+> 状态：🟡 进行中（Day 1-3 完成，Day 4-5 待开始）
 
 ## Day 1：环境搭建
 
@@ -288,18 +288,74 @@ python train.py config/train_shakespeare_char.py \
 
 ---
 
-## Day 3：换数据集 + 生成文本
+## Day 3：OpenWebText 下载失败 + Temperature 生成对比
+
+### OpenWebText 下载（2026-05-27 实际测试）
 
 ```bash
+# 直连 HuggingFace
 python data/openwebtext/prepare.py
-python train.py config/train_gpt2.py --max_iters=1000 --eval_interval=200
+# → 全部 8 个 parquet 并行下载 timeout（ReadTimeoutError）
+
+# HF 镜像
+HF_ENDPOINT=https://hf-mirror.com python data/openwebtext/prepare.py
+# → FileNotFoundError: 镜像无法代理 parquet 文件的绝对地址
 ```
 
-| temperature | 生成效果 | 观察 |
-|-------------|---------|------|
-| 0.8 | | |
-| 1.0 | | |
-| 1.5 | | |
+**结论**：OpenWebText 托管在 HuggingFace，国内直连和镜像均无法下载。改用 Shakespeare 模型做 temperature 对比实验（学习目标等价）。
+
+### 从 100 步继续训练到 1000 步
+
+```bash
+python train.py config/train_shakespeare_char.py \
+    --init_from=resume \
+    --out_dir=out-shakespeare-char \
+    --max_iters=1000 --batch_size=4 --block_size=64 \
+    --eval_interval=50 --compile=False
+```
+
+| 指标 | 100 步（起点） | 1000 步（终点） |
+|------|---------------|-----------------|
+| train loss | 2.7108 | 2.4983 |
+| val loss | 2.7131 | 2.5081 |
+| 每步耗时 | ~17ms | ~17ms |
+
+Loss 从 2.71 → 2.50，平稳下降。900 步额外训练约 15 秒。
+
+### Temperature 生成对比（1000 步模型）
+
+```bash
+python sample.py --out_dir=out-shakespeare-char --temperature=X \
+    --max_new_tokens=300 --num_samples=2 --compile=False
+```
+
+| temperature | 生成效果（截选） | 观察 |
+|-------------|-----------------|------|
+| **0.8** | `And thif brid owind t s s, be mad...` / `HOLINY:` / `PIF d las ate ar ce...` | 较保守，出现重复模式（`llll`），角色名格式稳定 |
+| **1.0** | `And thik brid owinen O la, bth...` / `KENOBY...` / `SWanous l lind...` | 多样性增加，出现更多新"角色名"，偶尔跳出空格 |
+| **1.5** | `And; bef bridcowi,fakis n, bte...` / `GUETHerabousel...` / `ENaW-CIAn...` | 最随机，大小写混乱，标点异常，几乎不可读 |
+
+#### 解读
+
+**1. Temperature 原理**：模型输出的是 logits（每个 token 的原始分数），经过 softmax 变成概率分布。Temperature 在 softmax 之前对 logits 做除法：
+
+```
+p(token_i) = softmax(logits / T)
+```
+
+- **T < 1**（如 0.8）：logits 被放大，高概率 token 更突出，低概率 token 被压制 → 输出更确定、更保守
+- **T = 1**：原始概率分布，不做任何干预
+- **T > 1**（如 1.5）：logits 被缩小，概率分布趋于均匀，低概率 token 获得更多机会 → 输出更多样、更随机
+
+**2. 为什么 100 步时看不出差异？** 当模型未经充分训练时，所有 token 的 logits 几乎相等（≈ 1/65 均匀分布）。此时无论 T=0.8 还是 T=1.5，概率分布没有本质区别，都是随机采样。**Temperature 只有在模型已经学到有意义的概率分布时才有调节作用。**
+
+**3. 1000 步模型的问题**：虽然能产生类单词片段和莎士比亚格式（角色名 + 冒号），但整体仍不通顺。字符级模型的特点——学会了局部拼写规律（如 `th`、`ou`、`ing`），但没有学会有意义的词语和语法。需要继续训练。
+
+**4. Temperature 选择的工程权衡**：
+- T=0.7~0.9：适合需要稳定输出的场景（如代码生成、翻译）
+- T=1.0：默认值，平衡多样性和质量
+- T=1.2~1.5：适合需要创意的场景（如故事创作、头脑风暴）
+- T>2.0：通常不可用，退化为随机采样 |
 
 ---
 
@@ -315,7 +371,7 @@ python train.py config/train_gpt2.py --max_iters=1000 --eval_interval=200
 
 - [x] Shakespeare 数据集训练成功，loss 正常下降
 - [x] 完成 3 组超参实验（block_size / n_layer / lr），记录分析
-- [ ] OpenWebText 数据集训练成功
-- [ ] `sample.py` 能正常生成文本
-- [ ] 调整过至少 3 个超参数，记录了对 loss 的影响
+- [x] Temperature 生成对比实验（0.8 / 1.0 / 1.5），理解了 softmax + temperature 原理
+- [-] OpenWebText 数据集：国内网络无法下载（HuggingFace 直连+镜像均失败），已记录踩坑
+- [ ] `sample.py` 在充分训练的模型上生成可读文本
 - [ ] Wandb 可视化的截图保存
