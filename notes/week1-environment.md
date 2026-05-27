@@ -1,8 +1,48 @@
 # Week 1：环境搭建 + 首次训练
 
-> 状态：🟡 进行中（Day 1-3 完成，Day 4-5 待开始）
+> 状态：🟢 完成（Day 1-5 全部完成）
 
-## Day 1：环境搭建
+## 实验与 Week 对应关系
+
+> 本阶段实验按时间线分布在 Week 1 的不同 Day，产物存放在 `experiments/` 目录。
+
+| 周次 | 实验 | 平台 | 产物位置 |
+|------|------|------|----------|
+| **Week 1 Day 1** | 环境搭建 + Shakespeare 100 步训练 | 本地 GTX 1650 | —（验证流程） |
+| **Week 1 Day 2** | 超参实验（block_size / n_layer / lr） | 本地 GTX 1650 | [experiments/hyperparam-search/](../experiments/hyperparam-search/) |
+| **Week 1 Day 3** | Temperature 生成对比 + OpenWebText 下载踩坑 | 本地 GTX 1650 | —（定性实验） |
+| **Week 1 Day 4-5** | GPT-2 (124M) 完整训练 | AutoDL RTX 4090D | [experiments/gpt2-wikitext/](../experiments/gpt2-wikitext/) |
+
+### Week 1 Day 1 · 内容速览
+
+- 本地环境搭建（Python/PyTorch/gcc/make/wandb）
+- GPU 验证 + 网络镜像配置
+- Shakespeare 字符级数据集分词
+- 100 步训练验证（loss 从 4.32 → 2.71）
+
+### Week 1 Day 2 · 内容速览
+
+- 3 组控制变量超参实验（block_size=32 / n_layer=2 / lr=3e-3）
+- 结论：baseline（block_size=64, n_layer=6, lr=1e-3）最优
+- 产物：[experiments/hyperparam-search/](../experiments/hyperparam-search/)（results.csv + run_configs.sh）
+
+### Week 1 Day 3 · 内容速览
+
+- 1000 步续训（loss 从 2.71 → 2.50）
+- Temperature 生成对比（0.8 / 1.0 / 1.5），理解 softmax + temperature 原理
+- OpenWebText 下载 6 种方案全部失败，记录根本原因
+
+### Week 1 Day 4-5 · 内容速览
+
+- AutoDL 云端环境搭建（RTX 4090D 24GB）
+- 磁盘管理（数据迁移到 50GB 数据盘）
+- WikiText-103 替代 OpenWebText（HF 镜像可用性差异）
+- GPT-2 124M 完整训练：5000 步，val loss 3.05，4.5h
+- 产物：[experiments/gpt2-wikitext/](../experiments/gpt2-wikitext/)（config.py + results.md）
+
+---
+
+## Day 1：环境搭建 —— 本地 GTX 1650
 
 ### 硬件环境
 - GPU：NVIDIA GeForce GTX 1650
@@ -369,11 +409,117 @@ p(token_i) = softmax(logits / T)
 
 ---
 
-## Day 4-5：Wandb 可视化 + 完整训练
+## Day 4-5：AutoDL GPT-2 (124M) 完整训练
 
-- Wandb 项目链接：____________
-- 5000 步训练最终 loss：____________
-- 截图保存位置：[diagrams/](../diagrams/)
+> 2026-05-27 ~ 2026-05-28，AutoDL C 线学习任务
+
+### 环境
+
+| 项目 | 详情 |
+|------|------|
+| **平台** | AutoDL (SeetaCloud) |
+| **GPU** | RTX 4090 D，24 GB 显存 |
+| **系统盘** | 30 GB（overlay） |
+| **数据盘** | 50 GB（/root/autodl-tmp） |
+| **Python** | 3.8.10 (miniconda3) |
+| **PyTorch** | 2.0.1+cu118 |
+| **代码** | nanoGPT (karpathy/nanoGPT) |
+| **SSH** | `ssh -p 11802 root@connect.westc.seetacloud.com` |
+
+### 数据集：WikiText-103（替代 OpenWebText）
+
+OpenWebText 在 AutoDL 上同样无法下载（与 Day 3 踩坑原因一致：HF 被墙 + 镜像不代理 S3/XetHub），改用 **WikiText-103**：
+
+| 文件 | 大小 | Token 数 |
+|------|------|----------|
+| `train.bin` | 228 MB | 119,721,490（~1.2 亿） |
+| `validation.bin` | 490 KB | 251,049 |
+
+预处理命令：
+```bash
+cd /root/autodl-tmp/nanoGPT_data/wikitext
+HF_ENDPOINT=https://hf-mirror.com python prepare.py
+# 注：WikiText-103 使用旧存储格式，hf-mirror.com 可用；OpenWebText 用 XetHub 则不行
+```
+
+### 模型与训练配置
+
+**GPT-2 Small (124M)**：12 层 / 12 头 / 768 维 / block_size=1024
+
+```python
+# config/train_gpt2_wikitext.py
+batch_size = 8
+block_size = 1024
+gradient_accumulation_steps = 40   # 有效批量 = 8×1024×40 = 327,680 token/step
+max_iters = 5000                   # 约 1.6B token，~13 epoch
+learning_rate = 6e-4
+min_lr = 6e-5                      # 1/10
+warmup_iters = 2000
+lr_decay_iters = 5000              # Cosine 衰减
+weight_decay = 0.1
+grad_clip = 1.0
+dtype = bfloat16
+compile = True                     # Linux + CUDA，torch.compile 正常工作
+```
+
+### 训练过程
+
+启动：
+```bash
+cd /root/code/nanoGPT-master
+python train.py config/train_gpt2_wikitext.py
+```
+
+Loss 下降曲线（关键节点）：
+
+| Iter | Train Loss | Val Loss | 说明 |
+|------|------------|----------|------|
+| 0 | 11.01 | - | 初始随机权重 |
+| 100 | 7.66 | - | 快速下降期 |
+| 200 | 6.40 | 6.32 | 第一次评估 |
+| 300 | 5.92 | - | 持续下降 |
+| ... | ... | ... | |
+| 5000 | - | **3.0458** | 最终 |
+
+训练速度：
+- 每步 ~3.2 秒（含 DataLoader + forward + backward + 40 步梯度累积）
+- MFU（Model FLOPs Utilization）：~27%
+- **总耗时：约 4 小时 27 分钟**
+
+### 结果
+
+| 指标 | 值 |
+|------|-----|
+| Final Val Loss | **3.0458** |
+| Perplexity | ~21.0 |
+| Checkpoint | 1.4 GB（含模型 + AdamW 状态） |
+
+### 踩坑记录
+
+**问题 1：磁盘空间不足**
+- 系统盘仅 30GB，训练数据+HF 缓存+checkpoint 会撑爆
+- 解决：将 `data/` 目录迁移到 50GB 数据盘并建立符号链接
+
+**问题 2：SSH 连接不稳定**
+- 本地 paramiko/原生 SSH 频繁断开（"Error reading SSH protocol banner"）
+- VS Code Remote-SSH 相对稳定
+
+**问题 3：gradient_accumulation 的作用**
+- 单卡显存有限，`batch_size=8` 无法再大
+- 通过 `gradient_accumulation_steps=40` 等效增大批量，保持训练稳定
+- 代价：每步 3.2s 中约 100ms 是梯度累积的同步开销
+
+### 与 Day 1 本地训练的对比
+
+| 维度 | Day 1 (GTX 1650) | Day 4-5 (RTX 4090D) |
+|------|------------------|---------------------|
+| 模型 | 10.65M（6层/384维） | 124M（12层/768维） |
+| 数据集 | Shakespeare (1MB) | WikiText-103 (228MB) |
+| 步数 | 100 / 1000 | 5000 |
+| 耗时 | 14s / 15s | 4.5h |
+| Val Loss | 2.71 / 2.50 | 3.05 |
+| torch.compile | 不可用（Windows 无 Triton） | 可用（Linux） |
+| 训练目标 | 验证流程 | 完整训练 |
 
 ---
 
@@ -382,6 +528,7 @@ p(token_i) = softmax(logits / T)
 - [x] Shakespeare 数据集训练成功，loss 正常下降
 - [x] 完成 3 组超参实验（block_size / n_layer / lr），记录分析
 - [x] Temperature 生成对比实验（0.8 / 1.0 / 1.5），理解了 softmax + temperature 原理
-- [-] OpenWebText 数据集：国内网络无法下载（HuggingFace 直连+镜像均失败），已记录踩坑
+- [x] OpenWebText 数据集：国内网络无法下载（HF 直连+镜像均失败），改用 WikiText-103 在 AutoDL 上完成
+- [x] AutoDL GPT-2 (124M) 完整训练：5000 步，val loss 3.05，4.5h，checkpoint 1.4GB
 - [ ] `sample.py` 在充分训练的模型上生成可读文本
 - [ ] Wandb 可视化的截图保存
