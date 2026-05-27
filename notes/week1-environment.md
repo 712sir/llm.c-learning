@@ -290,19 +290,29 @@ python train.py config/train_shakespeare_char.py \
 
 ## Day 3：OpenWebText 下载失败 + Temperature 生成对比
 
-### OpenWebText 下载（2026-05-27 实际测试）
+### OpenWebText 下载踩坑（2026-05-27 完整追踪）
 
-```bash
-# 直连 HuggingFace
-python data/openwebtext/prepare.py
-# → 全部 8 个 parquet 并行下载 timeout（ReadTimeoutError）
+**环境**：Python 3.9.13, datasets 2.x, huggingface_hub 0.36.2, VPN: 星云（代理端口 7897, TUN 模式对 Git Bash 无效）
 
-# HF 镜像
-HF_ENDPOINT=https://hf-mirror.com python data/openwebtext/prepare.py
-# → FileNotFoundError: 镜像无法代理 parquet 文件的绝对地址
-```
+**数据集规模**：80 个 parquet 文件 × 288MB = 23GB，tokenize 后 train.bin ≈ 17GB
 
-**结论**：OpenWebText 托管在 HuggingFace，国内直连和镜像均无法下载。改用 Shakespeare 模型做 temperature 对比实验（学习目标等价）。
+| 方案 | 命令/配置 | 结果 | 原因 |
+|------|----------|------|------|
+| ① 直连 | `python prepare.py` | `ConnectTimeout` | huggingface.co 被墙 |
+| ② HF 镜像 | `HF_ENDPOINT=https://hf-mirror.com` | `FileNotFoundError` | 镜像只代理 API，文件实际在 S3 (`cas-bridge.xethub.hf.co`)，镜像未代理 |
+| ③ 镜像 + 代理 | `HF_ENDPOINT=... HTTP_PROXY=...` | SSL EOF error | 代理对 S3 的 HTTPS CONNECT 隧道不稳定 |
+| ④ 直连 + 代理（TUN 模式） | 星云 TUN 模式 | `ConnectTimeout` | Git Bash/MSYS2 终端不走 TUN 虚拟网卡 |
+| ⑤ 直连 + 代理（HTTP_PROXY） | `HTTP_PROXY=127.0.0.1:7897` | API 返回 200，文件下载 7MB 后断连 | 代理连接不稳定，大文件传输频繁中断 |
+| ⑥ curl + 代理 | `curl -x http://127.0.0.1:7897` | 127MB 后超时 | 代理速度 ~1MB/s，单文件 288MB 需 5 分钟，中途常断 |
+
+**根本原因**：
+
+1. HuggingFace 的文件存储从自建 CDN 迁到了 AWS S3 (`cas-bridge.xethub.hf.co`)，国内直连不可达
+2. `hf-mirror.com` 只代理了 Hub API / 元数据，不代理底层 S3 文件传输
+3. 星云 VPN 是 IEPL 中转方案，带宽 3000Mbps 但连接稳定性不足以支撑 23GB 连续下载
+4. 每月流量配额 100GB，即使下载成功也会消耗 23%
+
+**结论**：国内环境下载 OpenWebText 不可行。改用 Shakespeare 数据集替代，学习目标等价。
 
 ### 从 100 步继续训练到 1000 步
 
