@@ -1,6 +1,6 @@
 # Week 1：环境搭建 + 首次训练
 
-> 状态：🟢 完成（Day 1-5 全部完成）
+> 状态：🟡 基本完成（仅剩 wandb 待补）
 
 ## 实验与 Week 对应关系
 
@@ -39,6 +39,37 @@
 - WikiText-103 替代 OpenWebText（HF 镜像可用性差异）
 - GPT-2 124M 完整训练：5000 步，val loss 3.05，4.5h
 - 产物：[experiments/gpt2-wikitext/](../experiments/gpt2-wikitext/)（config.py + results.md）
+
+---
+
+## 基础概念补充：3Blue1Brown ML 全家桶
+
+> 通过 B 站 3Blue1Brown 频道系统学习，补齐 ML 零基础短板。视频直观展示了神经网络内部运作机制，比文字效率高 10 倍。
+
+| 知识点 | 核心理解 |
+|--------|---------|
+| **神经网络** | 输入 → 隐藏层（权重矩阵 + 激活函数）→ 输出；本质是逼近任意函数的万有拟合器 |
+| **梯度下降** | 计算损失对每个参数的偏导数，沿负梯度方向调整；学习率控制步长 |
+| **反向传播** | 链式法则从输出往回逐层算梯度；PyTorch 的 `loss.backward()` 在 C 里要手写 |
+| **CNN** | 卷积核滑动扫描图像，局部感受野 + 参数共享 |
+| **Transformer** | 抛弃 RNN 的序列依赖，全靠 Attention 让每个位置直接看所有其他位置 |
+| **Softmax** | 把任意实数向量压成概率分布（和=1），温度控制分布尖锐/平坦 |
+| **贝叶斯** | 先验概率 + 新证据 → 后验概率；不确定性思维框架 |
+
+### 关键收获
+
+- **看懂模型结构图不再全是黑盒**：知道每个矩形是"权重矩阵"，箭头是"矩阵乘法 + 激活函数"
+- **理解训练循环的本质**：前向（make prediction）→ 算 loss（measure error）→ 反向（compute gradients）→ 更新参数（gradient descent）
+- **`B, T, C` 不再抽象**：就是数组三个维度，每一层都在对这个三维数组做变换
+- **"GPT 只看左边"（causal）** 和 Attention 的视觉直觉建立
+
+### 与课程对接
+
+看完 3B1B 后，接下来重新精读 model.py 的每个类，用刚学到的概念解构每行代码：
+- `nn.Linear` = 权重矩阵 `W`（学过）
+- `softmax` = 概率归一化（学过）
+- `LayerNorm` = 标准化 + 可学习缩放（新）
+- `Attention` = Transformer 的核心创新（学过直觉，读代码细节）
 
 ---
 
@@ -530,5 +561,6 @@ Loss 下降曲线（关键节点）：
 - [x] Temperature 生成对比实验（0.8 / 1.0 / 1.5），理解了 softmax + temperature 原理
 - [x] OpenWebText 数据集：国内网络无法下载（HF 直连+镜像均失败），改用 WikiText-103 在 AutoDL 上完成
 - [x] AutoDL GPT-2 (124M) 完整训练：5000 步，val loss 3.05，4.5h，checkpoint 1.4GB
-- [ ] `sample.py` 在充分训练的模型上生成可读文本
-- [ ] Wandb 可视化的截图保存
+- [x] `sample.py` 在充分训练的模型上生成可读文本（T=0.6/0.8/1.0 三组对比，T=0.8 最佳）
+- [ ] Wandb 可视化的截图保存（训练时 `wandb_log=False`，未记录数据）
+  - 待办：跑一个 500 步短训练，`wandb_log=True`，截图 loss 曲线后保存到 `experiments/gpt2-wikitext/`
