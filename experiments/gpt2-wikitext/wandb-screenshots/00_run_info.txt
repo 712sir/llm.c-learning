@@ -1,0 +1,23 @@
+WandB Run Summary
+====================
+Run: week1-demo
+URL: https://wandb.ai/models-hefei-university-of-technology/shakespeare-char/runs/1ugkht12
+Project: shakespeare-char
+Platform: GTX 1650 4GB
+
+Training Config:
+  dataset: shakespeare_char
+  model: 10.65M params (6 layers, 6 heads, 384 dim)
+  batch_size: 4
+  block_size: 64
+  max_iters: 500
+  learning_rate: 1e-3 (cosine to 1e-4)
+  warmup_iters: 100
+  compile: False (Windows no Triton)
+
+Final Metrics:
+  train_loss: 2.5415  (started at 4.32, down 1.78)
+  val_loss: 2.5459  (started at 4.32)
+  iter_time (avg): 16.5 ms
+  MFU (avg): 0.25%
+  total_time: ~41s

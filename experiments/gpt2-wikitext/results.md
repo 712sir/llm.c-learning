@@ -1,6 +1,6 @@
 # GPT-2 (124M) on WikiText-103
 
-> Week 1 Day 4-5 · AutoDL RTX 4090D 24GB · 2026-05-27 ~ 05-28
+> Week 1 Day 4-5 · AutoDL RTX 4090D 24GB
 
 ## 最终结果
 

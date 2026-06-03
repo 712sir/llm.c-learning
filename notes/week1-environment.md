@@ -1,6 +1,6 @@
 # Week 1：环境搭建 + 首次训练
 
-> 状态：🟡 基本完成（仅剩 wandb 待补）
+> 状态：🟢 全部完成
 
 ## 实验与 Week 对应关系
 
@@ -361,7 +361,7 @@ python train.py config/train_shakespeare_char.py \
 
 ## Day 3：OpenWebText 下载失败 + Temperature 生成对比
 
-### OpenWebText 下载踩坑（2026-05-27 完整追踪）
+### OpenWebText 下载踩坑（完整追踪）
 
 **环境**：Python 3.9.13, datasets 2.x, huggingface_hub 0.36.2, VPN: 星云（代理端口 7897, TUN 模式对 Git Bash 无效）
 
@@ -442,7 +442,7 @@ p(token_i) = softmax(logits / T)
 
 ## Day 4-5：AutoDL GPT-2 (124M) 完整训练
 
-> 2026-05-27 ~ 2026-05-28，AutoDL C 线学习任务
+> Week 1 Day 4-5，AutoDL C 线学习任务
 
 ### 环境
 
@@ -554,13 +554,56 @@ Loss 下降曲线（关键节点）：
 
 ---
 
+## Wandb 可视化（Week 2 补完）
+
+> 此前训练均使用 `wandb_log=False`，未记录可视化数据。本次补跑 500 步 Shakespeare 短训练，启用 wandb 日志，生成本地可视化图表。
+
+### 训练配置
+
+```bash
+python train.py config/train_shakespeare_char.py \
+    --wandb_log=True --wandb_project='shakespeare-char' --wandb_run_name='week1-demo' \
+    --max_iters=500 --batch_size=4 --block_size=64 \
+    --eval_interval=50 --compile=False
+```
+
+### 产物
+
+| 文件 | 说明 |
+|------|------|
+| `01_loss_curves.png` | train/val loss 曲线（4.32 → 2.54，11 个评估点） |
+| `02_iter_loss.png` | 每步迭代 loss + 滑动平均平滑曲线 |
+| `03_lr_schedule.png` | Cosine 学习率衰减 + 停止位置标记 |
+| `04_iter_time.png` | 迭代耗时（平均 16.5ms/步，排除 eval 的 ~3.4s） |
+| `05_mfu.png` | Model FLOPs Utilization（平均 0.25%，GTX 1650 小模型利用率低） |
+| `06_combined_dashboard.png` | 综合仪表盘（四合一视图） |
+| `00_run_info.txt` | 运行摘要 + 最终指标 |
+
+产物目录：[experiments/gpt2-wikitext/wandb-screenshots/](../experiments/gpt2-wikitext/wandb-screenshots/)
+Wandb 在线：https://wandb.ai/models-hefei-university-of-technology/shakespeare-char/runs/1ugkht12
+
+### 解读
+
+**Train loss 4.32 → 2.54**：500 步持续下降，无反弹，学习率健康。
+
+**Val loss 与 train loss 始终接近**：step 500 时 train 2.54 vs val 2.55，差距仅 0.01，未过拟合。
+
+**MFU 仅 0.25%**：GTX 1650 算力 2.9 TFLOPS，10.65M 小模型 forward/backward 计算量小，大部分时间消耗在 Python 开销和 kernel launch 上。大模型（GPT-2 124M）MFU 可达 27%。
+
+**Iter time 稳定在 16-17ms**：eval 步骤因跑 200 步验证需要 ~3.4s。正常迭代时间非常一致，说明系统没有间歇性干扰。
+
+---
+
 ## 阶段检查清单
 
-- [x] Shakespeare 数据集训练成功，loss 正常下降
-- [x] 完成 3 组超参实验（block_size / n_layer / lr），记录分析
-- [x] Temperature 生成对比实验（0.8 / 1.0 / 1.5），理解了 softmax + temperature 原理
-- [x] OpenWebText 数据集：国内网络无法下载（HF 直连+镜像均失败），改用 WikiText-103 在 AutoDL 上完成
-- [x] AutoDL GPT-2 (124M) 完整训练：5000 步，val loss 3.05，4.5h，checkpoint 1.4GB
-- [x] `sample.py` 在充分训练的模型上生成可读文本（T=0.6/0.8/1.0 三组对比，T=0.8 最佳）
-- [ ] Wandb 可视化的截图保存（训练时 `wandb_log=False`，未记录数据）
-  - 待办：跑一个 500 步短训练，`wandb_log=True`，截图 loss 曲线后保存到 `experiments/gpt2-wikitext/`
+- [√] Shakespeare 数据集训练成功，loss 正常下降
+- [√] 完成 3 组超参实验（block_size / n_layer / lr），记录分析
+- [√] Temperature 生成对比实验（0.8 / 1.0 / 1.5），理解了 softmax + temperature 原理
+- [√] OpenWebText 数据集：国内网络无法下载（HF 直连+镜像均失败），改用 WikiText-103 在 AutoDL 上完成
+- [√] AutoDL GPT-2 (124M) 完整训练：5000 步，val loss 3.05，4.5h，checkpoint 1.4GB
+- [√] `sample.py` 在充分训练的模型上生成可读文本（T=0.6/0.8/1.0 三组对比，T=0.8 最佳）
+- [√] Wandb 可视化的截图保存（Week 2 完成）
+  - 跑 500 步 Shakespeare 短训练，`wandb_log=True`，生成 6 张可视化图表
+  - 产物：[experiments/gpt2-wikitext/wandb-screenshots/](../experiments/gpt2-wikitext/wandb-screenshots/)（6 张 PNG + 1 个 run_info.txt）
+  - Wandb 在线地址：https://wandb.ai/models-hefei-university-of-technology/shakespeare-char/runs/1ugkht12
+  - 图表清单：loss 曲线、迭代 loss（平滑）、LR schedule、迭代时间、MFU、综合仪表盘
