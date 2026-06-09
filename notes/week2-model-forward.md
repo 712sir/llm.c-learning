@@ -24,6 +24,66 @@ GPTConfig:
     # 加上 embedding + lm_head ≈ 85M + 39M ≈ 124M
 ```
 
+```
+① block_size 的单位是"位置"（position），而非直接对应自然语言中的"单词数"或"字符数"。一个位置可容纳一个 token——经过 tokenizer 切分后的最小语义单元（如 "Hello" 是一个 token，"ization" 也是一个 token）。
+
+② tokenizer 是文本与数字序列之间的双向转换器。它将原始字符串切分为 token 序列并映射到词表索引，推理时再将模型输出的索引序列解码回可读文本。GPT-2 使用 Byte-Pair Encoding (BPE) tokenizer，词表规模 |V| = 50,257。tokenizer 的选取直接影响模型能表达的字符集和语言粒度。
+```
+
+### 0.3 参数规模溯源
+
+```
+wte 参数量   = vocab_size × n_embd  = 50257 × 768  ≈ 38.6M
+lm_head 参数量 = n_embd × vocab_size =  768 × 50257 ≈ 38.6M
+实际计入     ≈ 38.6M (wte) + 0 (lm_head 与 wte 共享权重) ≈ 38.6M
+
+wpe 参数量   = block_size × n_embd  = 1024 × 768   ≈  0.79M
+12 层 Block  = 12 × (各层 attention + MLP 参数)      ≈ 85.0M
+
+总计 ≈ 38.6M + 0.79M + 85.0M ≈ 124.4M
+```
+
+> 笔记 §六详述了 weight tying 的机制：`lm_head.weight` 与 `wte.weight` 共享同一块内存，因此这 38.6M 参数不会被重复计入。
+
+### 0.4 Token Embedding 与 Position Embedding 的语义分工
+
+| 维度 | Token Embedding (`wte`) | Position Embedding (`wpe`) |
+|------|------|------|
+| 回答的问题 | "这个 token **是什么**？" | "这个 token **位于序列的第几个位置**？" |
+| 查表键 | token ID ∈ [0, 50256] | position index ∈ [0, 1023] |
+| 参数矩阵形状 | (50257, 768) | (1024, 768) |
+| 同一 token 的不同出现 | 向量完全相同 | 向量因位置不同而不同 |
+| 存在的必要性 | 将离散符号映射为连续向量 | 补偿 Attention 的置换不变性——Self-Attention 本身无法区分 token 的顺序 |
+
+两者按元素相加（而非拼接）注入模型，实践表明加法足以让模型解耦语义信号和位置信号，同时避免了拼接带来的维度翻倍。
+
+### 0.5 Transformer Block 的数据流直觉
+
+理解 Transformer 不应从代码出发，而应从"数据经过了怎样的变换"出发。将 GPT-2 视为一个**多层信息精炼流水线**：
+
+```
+Token IDs (B, T)
+    │
+    ▼  wte + wpe
+Embedding Vectors (B, T, C)    ← 每个 token 获得一个稠密向量表示
+    │
+    ▼  Block × 12 (每层保持 B,T,C 形状不变)
+    │  ┌─────────────────────────────────────────┐
+    │  │ Attention 子层：每个 token 查询其前文，   │
+    │  │              从相关 token 处聚合信息      │
+    │  │ MLP 子层：    对每个 token 独立做非线性变换 │
+    │  │ + 残差连接：  保留原始信号，防止梯度消失    │
+    │  └─────────────────────────────────────────┘
+    │
+    ▼  ln_f
+Final Hidden States (B, T, C)
+    │
+    ▼  lm_head
+Logits (B, T, vocab_size)     ← 每个位置输出一个"下一个 token 的概率分布"
+```
+
+这并非一个包含 if-else 分支的业务程序，而是一条**数据变换流水线**。阅读源码时只需追踪两类信息：(1) 每一步操作的输入/输出 shape；(2) 该操作在"信息流动"中扮演的角色。
+
 ### 模型整体结构（5 层嵌套）
 
 ```
@@ -43,6 +103,149 @@ GPT
 ---
 
 # Day 1：model.py 上半部分 — LayerNorm + CausalSelfAttention
+
+---
+
+## ▸ 前置知识：阅读源码所需的 Python/PyTorch 语法速查
+
+> 以下仅覆盖 nanoGPT 源码中实际出现的语法。每一条均标注在源码中的使用位置。
+
+### 类与继承
+
+```python
+class CausalSelfAttention(nn.Module):  # 继承 nn.Module——所有神经网络层的基类
+    def __init__(self, config):        # 构造函数：定义参数
+        super().__init__()             # 必须先调用父类构造，否则 nn.Module 的内部机制
+                                       # （参数追踪、.to(device)、.state_dict() 等）全部失效
+        self.c_attn = nn.Linear(...)   # 注册为模块属性，自动加入参数列表
+```
+
+`super().__init__()` 是 Python 多重继承机制中的标准调用，其作用是初始化 `nn.Module` 的内部数据结构——包括 `_parameters`、`_buffers`、`_modules` 三个 OrderedDict，以及 forward hook / backward hook 等回调机制。若省略此行，`nn.Module` 将无法追踪子模块与参数，后续所有依赖参数列表的操作（梯度计算、状态保存、设备迁移）均将静默失败。
+
+### `nn.Module` 的两个核心方法
+
+```python
+model.state_dict()   # 将所有参数序列化为 OrderedDict，用于保存/加载模型
+# → {'transformer.wte.weight': tensor(50257,768),
+#    'transformer.h.0.attn.c_attn.weight': tensor(768,2304), ...}
+torch.save(model.state_dict(), 'checkpoint.pt')    # 保存
+model.load_state_dict(torch.load('checkpoint.pt')) # 加载
+
+model.to(device)     # 递归地将所有 parameter 和 buffer 移动到指定设备
+model.to('cuda')     # 搬至 GPU；内部调用各 tensor 的 .to('cuda')
+model.to('cpu')      # 搬回 CPU
+# 在 nanoGPT 中，model = GPT(config).to(device) 一步完成初始化与设备迁移
+```
+
+### 矩阵运算语法
+
+```python
+C = A @ B             # 矩阵乘法，等价于 torch.matmul(A, B)
+# (M, K) @ (K, N) → (M, N)
+# nanoGPT 中使用：att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+
+x.transpose(dim1, dim2)  # 交换两个维度，不改变数据物理存储
+# x.shape=(B,nh,T,hs) → x.transpose(1,2).shape=(B,T,nh,hs)
+
+x.view(shape...)          # 改变张量形状，要求数据在内存中连续排列
+# 若之前执行过 transpose，需先调用 .contiguous() 重新排列内存
+# nanoGPT 使用：y = y.transpose(1,2).contiguous().view(B, T, C)
+
+x.split(split_size, dim)  # 沿 dim 维度切分张量
+# q, k, v = qkv.split(self.n_embd, dim=2)
+# 将 (B, T, 2304) 沿 dim=2 切成三个 (B, T, 768)
+```
+
+### `nn.Linear` — 全连接层
+
+```python
+layer = nn.Linear(in_features, out_features, bias=True)
+# 内部参数：weight (out_features, in_features), bias (out_features,)
+# 数学上实现：y = x @ weight^T + bias
+# (B, T, in_features) → (B, T, out_features)
+
+# nanoGPT 中的实例：
+self.c_attn = nn.Linear(768, 2304)    # 768→2304=3×768  (Fused QKV)
+self.c_proj = nn.Linear(768, 768)      # 768→768          (输出投影)
+```
+
+### `nn.Embedding` — 嵌入查表
+
+```python
+emb = nn.Embedding(num_embeddings, embedding_dim)
+# 内部参数：weight (num_embeddings, embedding_dim)
+# 输入 token ID → 返回第 token_id 行的向量
+# 本质是一个可学习的查找表（lookup table）
+
+# nanoGPT 中的实例：
+self.transformer.wte = nn.Embedding(50257, 768)  # 5万个词，每个768维
+self.transformer.wpe = nn.Embedding(1024, 768)    # 1024个位置，每个768维
+```
+
+### `register_buffer` — 非参数持久化张量
+
+```python
+self.register_buffer("bias", tril_tensor)
+# register_buffer 注册的张量具有以下特性：
+#   - 不参与梯度计算（区别于 nn.Parameter）
+#   - 随 model.state_dict() 保存/加载（区别于普通属性）
+#   - 随 model.to(device) 自动迁移（区别于普通属性）
+# 适用场景：causal mask——固定不变，但需随模型一同持久化和设备迁移
+```
+
+---
+
+## ▸ 前置知识：Q、K、V 与 Self-Attention 的直觉
+
+> 这是理解 CausalSelfAttention 的必要前置。若已熟悉 Attention 机制，可直接跳到下一节。
+
+### 检索类比（最直观的理解方式）
+
+将 Self-Attention 建模为一次**数据库检索**：当前 token 发出一次查询（Query），与序列中所有 token 的索引键（Key）进行匹配，根据匹配得分从各 token 的值存储（Value）中聚合信息。
+
+```
+Q (Query):  当前 token 的"检索意图"——"我需要什么样的上下文信息？"
+K (Key):    每个 token 的"索引标签"——"我是什么类型的 token？"
+V (Value):  每个 token 的"实际内容"——"我可以提供什么信息？"
+
+Attention(Q, K, V) = softmax(Q @ K^T / √d_k) @ V
+
+步骤：
+① Q @ K^T → 得分矩阵 S，S[i][j] = token_i 对 token_j 的"原始关注度"
+② / √d_k  → 缩放，防止内积方差过大导致 softmax 梯度饱和
+③ softmax → 将每行归一化为概率分布（∑_j = 1）
+④ @ V     → 按概率加权求和，token_i 的新表示 = Σ_j prob(i→j) × V_j
+```
+
+### 具体实例
+
+```
+输入句子: "The cat sat on the mat"  (token 索引: 0 1 2 3 4 5)
+
+计算 token_2 ("sat") 的新表示：
+① sat 发出 Q₂："我是动词，我需要主语和介词宾语"
+② 与所有前文的 K 做内积：K₀(The)=0.1, K₁(cat)=0.7, K₂(sat)=0.2
+   → cat 的 Key 与 Q₂ 最匹配（主语-谓语的语义关系）
+③ softmax → 概率分布 [0.12, 0.65, 0.23]
+④ 加权求和：0.12×V₀ + 0.65×V₁ + 0.23×V₂
+   → sat 的新表示融合了 cat 的语义信息
+```
+
+### 为什么叫 "Causal" Self-Attention？
+
+标准 Self-Attention 允许每个 token 关注所有 token（包括未来的），而 **Causal** Self-Attention 通过下三角掩码强制 token_i 只能关注 token_{0..i}。这保证了自回归生成的因果性——当前输出只能依赖于已生成的 token。
+
+### `Q @ K^T` 的 Shape 语义
+
+```
+Q: (B, nh, T, hs)     ← B 个样本，nh 个头，T 个 token，每个头 hs 维
+K: (B, nh, T, hs)     
+
+K.transpose(-2, -1) → (B, nh, hs, T)   ← 最后两维交换
+
+Q @ K^T               → (B, nh, T, T)   ← 注意力分数矩阵
+                                            [b][h][i][j] = token_i 对 token_j 的原始注意力得分
+```
 
 ---
 
@@ -96,6 +299,71 @@ class LayerNorm(nn.Module):
 | ④ | `input.var(-1, keepdim=True)` | (2, 3, 4) | (2, 3, **1**) | 每行的 4 个数求方差 |
 | ⑤ | `(input - mean) / sqrt(var + eps)` | (2,3,4) | (2, 3, 4) | 广播：mean/var 从 (2,3,1) 扩到 (2,3,4) |
 | ⑥ | `weight * xhat + bias` | (2,3,4) | (2, 3, 4) | 广播：weight/bias 从 (4,) 扩到 (2,3,4) |
+
+### 两种归一化维度的本质区别
+
+> 对于输入张量 `x.shape = (B, T, C)`，归一化维度的选择决定了"谁和谁一起被归一化"。
+
+| | 沿 C 维度 (LayerNorm 的做法) | 沿 T 维度 (不推荐) |
+|------|------|------|
+| 操作粒度 | 每个 token 独立归一化 | 跨 token 联合归一化 |
+| 归一化对象 | token_i 的 C 个特征值求 mean/var | 所有 token 的某个特征维度求 mean/var |
+| 推理兼容性 | 新 token 加入不影响旧 token 的归一化结果 → KV Cache 友好 | 新 token 加入需要重新计算所有旧 token 的统计量 → KV Cache 不兼容 |
+| GPT-2 使用 | ✅ | ❌ |
+
+**实例**：
+
+```
+x: [[[0.5, -0.3, 0.8, 0.1],   ← token_0, 4维向量
+      [0.2,  0.7,-0.1, 0.4],   ← token_1
+      [0.9, -0.2, 0.3,-0.5]]]  ← token_2
+
+沿 C 维归一化 (LayerNorm)：
+  token_0: mean(0.5,-0.3,0.8,0.1)=0.275, var=... → 归一化 token_0 的四个数
+  token_1: mean(0.2,0.7,-0.1,0.4)=0.3, var=...   → 归一化 token_1 的四个数
+  token_2: 同样独立归一化
+  → 三个 token 互不影响 ✓
+
+沿 T 维归一化 (假设)：
+  第一维特征: mean(0.5, 0.2, 0.9)=0.533 → 归一化这三个值
+  第四维特征: mean(0.1, 0.4,-0.5)=0.0   → 归一化这三个值
+  → 新 token_3 加入 → 全部统计量需重算 ✗
+```
+
+### 减均值与除标准差的数学意义
+
+LayerNorm 的两个操作各司其职：
+
+```
+减均值 (centering):  消除数据的一阶统计量（均值），使输出以零为中心分布
+  作用：移除不同 token 的 embedding 范数差异，让模型关注"方向"而非"缩放"
+  若省略：embedding 较大的 token 会主导后续 Attention 计算
+
+除标准差 (scaling):  消除数据的二阶统计量（方差），使每维的尺度统一
+  作用：防止某些特征维度过大而在 Attention 内积计算中产生不合理的优势
+  若省略：内积 Q@K^T 的方差不可控，softmax 输出趋近于 one-hot → 梯度消失
+```
+
+### RMSNorm：去掉减均值，只保留除均方根
+
+```
+LayerNorm:  y = (x - mean) / √(var + ε) * γ + β    (两步归一化)
+RMSNorm:    y =  x           / √(mean(x²) + ε) * γ  (一步归一化，无 β)
+
+mean(x²) = 各元素平方的均值，即"均方"（root mean square 的 square 部分）
+```
+
+**为什么去掉减均值？**
+
+> 实验证据（Zhang & Sennrich, 2019）表明：在 Transformer 架构中，减均值操作对最终效果的贡献极小，但消耗约 10-15% 的归一化计算开销。去除减均值后，模型收敛行为几乎不变，而计算效率显著提升。
+>
+> 这并非"认为减均值不重要"的武断假设，而是经过消融实验验证的工程决策。LLaMA、Mistral、Qwen 等现代 LLM 全系采用 RMSNorm。
+
+### 为什么 `eps=1e-5` 而不是 `1e-8`？
+
+> FP16（半精度浮点）的动态范围为 6.10 × 10⁻⁵ ~ 6.55 × 10⁴。`1e-8` 在 FP16 下可能出现次正规数（subnormal）问题，精度损失严重。`1e-5` 在 FP16 的有效范围内，足以防止除零错误，同时不影响混合精度训练的稳定性。
+
+---
 
 ### 🔥 面试必问
 
@@ -990,3 +1258,65 @@ def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
 10. [ ] CausalSelfAttention 的 `bias` 是 buffer 还是 parameter？为什么？
 11. [ ] 写出 GPT-2 124M 的总参数计算公式（不用精确数字，推导过程即可）
 12. [ ] 如果 `block_size=2048, n_head=16, n_embd=1024`，每层 attention 的 Q@K^T 矩阵多大（MB）？
+
+---
+
+## 附录 A：Dropout 三种类型速查
+
+nanoGPT 中出现了三种 dropout，施加位置和目标各不相同：
+
+| 类型 | 代码位置 | 施加对象 | 效果 |
+|------|------|------|------|
+| **Embedding dropout** | `self.transformer.drop(x)` | token_emb + pos_emb 的逐元素结果 | 随机将某些特征维度置零，强制模型不过度依赖特定 embedding 维度 |
+| **Attention dropout** | `self.attn_dropout(att)` | softmax 之后的注意力权重矩阵 | 随机切断某些 token 之间的注意力连接，强制模型不过度依赖单一 attention head 中的特定路径 |
+| **Residual dropout** | `self.resid_dropout(y)` | 每个子层（Attention / MLP）的输出 | 随机丢弃子层输出中的部分贡献，放大残差路径（identity path）的相对重要性，效果等同于 Stochastic Depth |
+
+三者均仅在**训练模式**（`model.train()`）下生效。调用 `model.eval()` 后所有 dropout 自动关闭，保证推理结果的确定性。
+
+---
+
+## 附录 B：FlashAttention 与 PagedAttention 简介
+
+### FlashAttention
+
+标准 Attention 的 `Q@K^T` 产生一个形状为 `(B, nh, T, T)` 的中间矩阵，该矩阵需经 HBM（高带宽显存/Global Memory）写入后再读出，形成显著的 I/O 瓶颈。FlashAttention 将 Q、K、V 切分为小 Tile，在 SRAM（Shared Memory）内完成分块 softmax 的计算——利用 online softmax 算法，将中间结果保持在片上，仅将最终结果写回 HBM。
+
+> 性能收益：HBM 读写量降低 4-8 倍（取决于序列长度），训练速度提升 2-4 倍。vLLM、PyTorch 2.0+ 均已内置 FlashAttention。
+
+### PagedAttention
+
+推理阶段的 KV Cache 按 token 连续分配时，会产生类似于 OS 内存管理中"外部碎片"的问题——已释放的短序列 Cache 块无法被新请求的长序列复用。PagedAttention 借鉴操作系统虚拟内存的分页思想，将 KV Cache 按固定大小的 Block 管理：
+
+- 每个请求的 KV Cache 被切分为多个"页"（Block），页与页之间通过逻辑映射表关联
+- 物理显存中不再需要连续区域，碎片问题消除
+- 支持 Copy-on-Write（写时复制），be am search 等场景中可共享相同前缀的 KV Cache
+
+> 这是 vLLM 的核心技术。PagedAttention 论文发表于 SOSP 2023（操作系统顶会），是罕见的被操作系统社区认可的 ML 系统工作。
+
+---
+
+## 附录 C：学习产出与就业认可
+
+### 学完本笔记可直接写在简历上的技能点
+
+```
+- 精读 GPT-2 124M 完整源码（model.py），理解从 Embedding 到 lm_head 的全链路数据流
+- 能画出 Attention 数据流图（含每步的 Shape 追踪标注）
+- 掌握 Pre-Norm vs Post-Norm、Fused QKV Projection、Weight Tying 等设计决策及其原理
+- 理解 KV Cache 推理加速（O(N²)→O(N)）、FlashAttention（I/O 优化）、PagedAttention（显存管理）的核心思想
+```
+
+### 面试场景可直接引用的表述
+
+> "我完整阅读过 nanoGPT 的源码实现，能讲清楚 CausalSelfAttention 中从 QKV Projection 到 output projection 的 10 步 Shape 变化全链路，包括为什么用 Fused QKV 而不是三个独立的 Linear、transpose 之后为什么必须 contiguous()、以及 causal mask 的 -inf 填充与 softmax 的交互行为。"
+>
+> "基于对 Pre-Norm 残差路径的理解，我能解释为什么现代 LLM（GPT-2/LLaMA）全面采用 Pre-Norm 而非原版 Transformer 的 Post-Norm——核心在于梯度流经过 identity path 直接反向传播，消除了对 learning rate warmup 的依赖。"
+>
+> "我了解 PagedAttention 借鉴了操作系统分页机制来解决 KV Cache 的显存碎片问题，并理解 FlashAttention 通过 online softmax 和 tiling 将 Attention 的 HBM 读写量降低了 4-8 倍。"
+
+### 本笔记对后续学习的前置价值
+
+- **MiniInfer 项目**：模型加载、前向推理的实现 100% 依赖本笔记中的架构理解
+- **vLLM 源码阅读**：vLLM 的 ModelRunner、BlockManager 等模块与 GPT-2 架构一一对应
+- **CUDA kernel 优化**：理解 Attention 的计算模式后，手写 GEMM/FlashAttention kernel 才有优化目标
+- **面试复习**：本文 24 道自测题 + 各节面试拷问可作为面试前的系统回顾清单
