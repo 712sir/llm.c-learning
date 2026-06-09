@@ -214,14 +214,36 @@ K: (B, nh, T, hs)
 class LayerNorm(nn.Module):
     def __init__(self, ndim, bias):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(ndim))   # 可学习的γ，初始全1
-        self.bias   = nn.Parameter(torch.zeros(ndim)) if bias else None  # 可学习的β，初始全0
+        # ① weight (gamma): 可学习的缩放参数，shape = (ndim,)
+        #    初始化为全 1.0 —— 即不做缩放，训练中慢慢调
+        self.weight = nn.Parameter(torch.ones(ndim))
+        # ② bias (beta): 可学习的平移参数，shape = (ndim,)
+        #    初始化为全 0.0 —— 即不做平移
+        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
 
-    def forward(self, input):              # input.shape = (B, T, C)
-        mean = input.mean(dim=-1, keepdim=True)   # 沿最后一维求均值，(B,T,C)→(B,T,1)
-        var  = input.var(dim=-1, keepdim=True, unbiased=False)  # 沿最后一维求方差
-        xhat = (input - mean) / torch.sqrt(var + 1e-5)  # 减均值，除标准差
-        return self.weight * xhat + self.bias if self.bias is not None else self.weight * xhat
+    def forward(self, input):
+        # ③ 沿最后一维（C / n_embd 维度）计算均值
+        #    input.shape = (B, T, C) → mean.shape = (B, T, 1)
+        #    keepdim=True: 保留维度，让广播机制能自动对齐
+        #    -1: 表示最后一维
+        mean = input.mean(dim=-1, keepdim=True)
+
+        # ④ 沿最后一维计算方差
+        #    unbiased=False: 用有偏估计（深度学习场景样本量够大，不需无偏修正）
+        #    var.shape = (B, T, 1)
+        var = input.var(dim=-1, keepdim=True, unbiased=False)
+
+        # ⑤ 归一化：(x - 均值) / 标准差
+        #    eps=1e-5: 防止除零 — FP16 下 1e-8 会出 subnormal 精度问题
+        #    xhat.shape = (B, T, C)
+        xhat = (input - mean) / torch.sqrt(var + 1e-5)
+
+        # ⑥ 仿射变换：y = γ·x̂ + β（恢复模型的表达能力）
+        #    归一化会强制分布→会丢失信息，γ 和 β 让模型"恢复"需要的信息
+        #    weight/bias 都是 (C,) → 广播到 (B, T, C)
+        output = self.weight * xhat + self.bias if self.bias is not None \
+                 else self.weight * xhat
+        return output
 ```
 
 每一步在做什么：
@@ -260,25 +282,43 @@ RMSNorm:    y =  x         / rms * γ        （一步，只除均方根）
 
 ## 第 4 章：CausalSelfAttention —— 核心中的核心
 
-### 4.1 `__init__`：准备好了哪些工具
+### 4.1 `__init__` —— 逐行注释
 
 ```python
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
-        # ① Fused QKV：一次矩阵乘法同时算出 Q、K、V
-        self.c_attn = nn.Linear(768, 2304)    # 768→2304=3×768
+        assert config.n_embd % config.n_head == 0
+        # n_embd=768, n_head=12 → 每个 head 的维度 hs=64
 
-        # ② Output projection：把多头拼起来后，再做一次整合
-        self.c_proj = nn.Linear(768, 768)
+        # ① c_attn: Fused QKV Projection
+        #    输入维度 C=768，输出维度 3C=2304
+        #    为什么是 3×？因为 Q、K、V 各占 C 维，合在一起 3C
+        #    一次矩阵乘法同时算出三个投影 → 比分开三次省了两次 kernel launch
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
 
-        # ③ causal mask：注册为 buffer（不参与梯度，但随模型保存和迁移）
-        self.register_buffer("bias",
-            torch.tril(torch.ones(1024,1024)).view(1,1,1024,1024))
+        # ② c_proj: Output Projection
+        #    attention 的输出也是 C 维，再做一次线性变换
+        #    为什么需要？attention 把各头的信息混在一起了，c_proj 负责跨头整合
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
 
-        # ④ 两个 dropout（详见附录 A）
-        self.attn_dropout = nn.Dropout(0.1)
-        self.resid_dropout = nn.Dropout(0.1)
+        # ③ causal mask: 下三角矩阵，注册为 buffer 而不是 parameter
+        #    buffer: 不参与梯度计算，但会随模型保存/加载和自动设备迁移
+        #    parameter: 参与梯度计算
+        #    因果掩码是固定的——下三角全1，上三角全0——不需要学习 → 用 buffer
+        self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
+                                     .view(1, 1, config.block_size, config.block_size))
+        # ④ bias 的 shape: (1, 1, block_size=1024, block_size=1024)
+        #    四维：batch维=1, head维=1, 高=1024, 宽=1024
+        #    前两个维度为 1 是为了广播：匹配 (B, nh, T, T) 的 attention scores
+
+        self.n_head = config.n_head      # 12
+        self.n_embd = config.n_embd      # 768
+        self.dropout = config.dropout    # 训练时 0.1，推理时 0.0（model.eval() 自动切换）
+
+        # ⑤ 两种 dropout——施加位置和目标不同（区别见附录A）
+        self.attn_dropout = nn.Dropout(config.dropout)   # Attention 权重上的 dropout
+        self.resid_dropout = nn.Dropout(config.dropout)   # 残差路径上的 dropout
 ```
 
 关键设计决策：
@@ -287,78 +327,68 @@ class CausalSelfAttention(nn.Module):
 
 **causal mask 为什么用 buffer 而不是 parameter？** causal mask 是固定的下三角矩阵，不需要学。buffer 的特性：不参与梯度、随 state_dict 保存、随 model.to(device) 自动迁移——刚好满足所有需求。
 
-### 4.2 `forward`：逐行 Shape 追踪
-
-这是整个模型最核心的一段代码。放慢速度，一行一行看。
+### 4.2 `forward` —— 逐行 Shape 追踪（整个模型最核心的代码）
 
 ```python
-def forward(self, x):              # x: (B, T, C)  例：(4, 512, 768)
+def forward(self, x):
+    # 输入 x.shape = (B, T, C)，例如 (B=4, T=512, C=768)
     B, T, C = x.size()
-```
 
-**Step 1：一次算出 Q、K、V**
+    # ===== Step 1: Fused QKV Projection =====
+    # c_attn(x): (B, T, C=768) → (B, T, 3C=2304)
+    # 一次矩阵乘法同时算出 Q、K、V（分开三次要多花 kernel launch 开销）
+    qkv = self.c_attn(x)                    # (B, T, 3*C)
+    # 沿 dim=2 切成三份，每份 768 维
+    q, k, v = qkv.split(self.n_embd, dim=2) # 三个 (B, T, C)
 
-```python
-    qkv = self.c_attn(x)            # (B, T, 3C)  例：(4, 512, 2304)
-    q, k, v = qkv.split(C, dim=2)   # 三个 (B, T, C)
-```
+    # ===== Step 2: 重塑为多头格式 =====
+    # 从 (B, T, C=768) 变成 (B, nh=12, T, hs=64)
+    # view( B, T, 12, 64) → 每个头拿到 64 维的子空间
+    # transpose(1, 2)       → 把 n_head 维提到 batch 后面，方便并行计算
+    q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+    # q: (B, T, 768) → view → (B, T, 12, 64) → transpose → (B, 12, T, 64)
+    k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+    # k: (B, 12, T, 64)
+    v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)
+    # v: (B, 12, T, 64)
 
-Fused QKV 的好处：一次矩阵乘法，三次计算合并为一次。上面刚解释过。
+    # ===== Step 3: 计算 Attention Scores =====
+    # Q @ K^T: (B, 12, T, 64) @ (B, 12, 64, T) → (B, 12, T, T)
+    # k.transpose(-2, -1): 将 K 的最后两维交换 (B,12,T,64)→(B,12,64,T)
+    # 结果矩阵 [b][h][i][j] = token_i 对 token_j 的"原始注意力分数"
+    att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+    # att.shape = (B, 12, T, T)
 
-**Step 2：切成多头**
-
-```python
-    q = q.view(B, T, nh, hs).transpose(1, 2)  # (B, T, 12, 64) → (B, 12, T, 64)
-    k = k.view(B, T, nh, hs).transpose(1, 2)  # 同上
-    v = v.view(B, T, nh, hs).transpose(1, 2)  # 同上
-```
-
-为什么要切成 12 个头？一个 768 维向量做 Attention → 只能学一种"关注模式"。切成 12 个 64 维子向量分别做 Attention → 可以同时学会"主语-谓语"、"指代-被指代"、"修饰-被修饰"等多种不同的关注关系。每个头在不同的低维子空间独立工作。
-
-**Step 3：算注意力分数**
-
-```python
-    att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(hs))
-    # q: (B, 12, T, 64)   k^T: (B, 12, 64, T)  → att: (B, 12, T, T)
-```
-
-`Q @ K^T` 算出"谁跟谁的关联度如何"的分数矩阵。除以 `√hs` 是因为：Q 和 K 都是 64 维的高斯随机向量，它们的点积的方差是 64。不除 → 分数方差太大 → softmax 输出变成 dead one-hot → 梯度消失。除了 → 方差控制为 1 → 梯度流正常。论文名"Scaled Dot-Product Attention"里的 "Scaled" 指的就是这个除法。
-
-**Step 4：因果掩码——不许偷看答案**
-
-```python
+    # ===== Step 4: Causal Mask —— 屏蔽未来 =====
+    # bias[:,:,:T,:T] → (1, 1, T, T): 下三角全 0，上三角全 -inf
+    # masked_fill(bias==0, -inf): 把上三角（未来位置）的分数设为 -inf
+    # softmax(-inf) → 0，所以未来位置的注意力权重变成 0
+    # → token_i 只能看到 token_0...token_i，看不到 token_{i+1} 及以后
     att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-```
 
-`bias` 是一个下三角全 1、上三角全 0 的矩阵。把上三角（未来位置）的分数填成 `-inf` → `softmax(-inf) = 0` → 未来 token 的贡献归零。这样就保证 token_i 只能关注 token_0..token_i。
+    # ===== Step 5: Softmax + Dropout =====
+    att = F.softmax(att, dim=-1)            # 沿最后一维（被关注方）归一化，每行和=1
+    att = self.attn_dropout(att)            # 训练时随机切断一些注意力连接，防止过拟合
+    # att.shape 仍为 (B, 12, T, T)
+    # att[b][h][i][j] = token_i 关注 token_j 的概率
 
-**Step 5：分数变概率**
+    # ===== Step 6: 加权求和 =====
+    # att @ V: (B, 12, T, T) @ (B, 12, T, 64) → (B, 12, T, 64)
+    y = att @ v
+    # y[b][h][i][:] = Σ_j att[b][h][i][j] × v[b][h][j][:]  ← 加权混合
+    # token_i 的新表示 = 所有之前 token 的 V 的加权和
 
-```python
-    att = F.softmax(att, dim=-1)   # 每行归一化为概率分布
-    att = self.attn_dropout(att)   # 训练时随机丢弃一些注意力连接
-```
+    # ===== Step 7: 合并多头 + 输出投影 =====
+    # transpose(1,2): 把 head 维和 T 维换回来 → (B, T, 12, 64)
+    # contiguous(): 必须！transpose 只改了 stride，view 要求连续内存
+    # view(B, T, C): 合并 12 个头 → (B, T, 768)
+    y = y.transpose(1, 2).contiguous().view(B, T, C)
 
-**Step 6：按概率加权取 V**
-
-```python
-    y = att @ v                    # (B, 12, T, T) @ (B, 12, T, 64) → (B, 12, T, 64)
-```
-
-每个 token 的新表示 = 对所有前面 token 的 V 的加权和，权重就是 attention 概率。
-
-**Step 7：合并多头 + 输出投影**
-
-```python
-    y = y.transpose(1, 2).contiguous().view(B, T, C)   # 从 (B,12,T,64) 变回 (B,T,768)
-    y = self.c_proj(y)                                  # (B, T, 768)
-    y = self.resid_dropout(y)
+    # c_proj: 把各头信息混在一起（跨头交互）
+    y = self.c_proj(y)                      # (B, T, 768) → (B, T, 768)
+    y = self.resid_dropout(y)               # 残差路径上的 dropout
     return y
 ```
-
-`transpose(1,2)` 把 head 维和 T 维换回来。`contiguous()` 必须写——transpose 只改了读取方式（stride），没有真的重新排列数据。`.view()` 要求数据在内存中连续，不 contiguous 就报错。
-
-`c_proj` 把 12 个独立计算的头的信息混在一起——让模型学会跨头交互。注意力虽然分了头，但输出投影可以把各头的结果重新组合。
 
 ### 4.3 10 步 Shape 变化速查表
 
@@ -433,14 +463,26 @@ qkv (4, 512, 2304)
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.c_fc   = nn.Linear(768, 3072)   # 膨胀 4 倍
-        self.gelu   = nn.GELU()
-        self.c_proj = nn.Linear(3072, 768)    # 压缩回来
-        self.dropout = nn.Dropout(0.1)
+        # ① c_fc: C → 4*C  膨胀 4 倍（GPT-2 是 4×，Llama 用 SwiGLU 是 ~2.67×）
+        #    为什么叫 fc？fully-connected 的缩写
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        # ② gelu: 激活函数——比 ReLU 更平滑、处处可导（见下方对比图）
+        self.gelu = nn.GELU()
+        # ③ c_proj: 4*C → C  压缩回来，维度恢复
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
-        return self.dropout(self.c_proj(self.gelu(self.c_fc(x))))
-        # x (B,T,768) → c_fc → (B,T,3072) → gelu → (B,T,3072) → c_proj → (B,T,768)
+        # x: (B, T, C=768)
+        #   → c_fc: Linear(768, 3072) → (B, T, 3072)
+        #   → gelu: 逐元素激活 → (B, T, 3072)
+        #   → c_proj: Linear(3072, 768) → (B, T, 768)
+        #   → dropout
+        x = self.c_fc(x)
+        x = self.gelu(x)
+        x = self.c_proj(x)
+        x = self.dropout(x)
+        return x
 ```
 
 MLP 的作用：膨胀到 4 倍维度 → 让模型有足够空间做非线性变换 → GELU 激活 → 压回原维度。每个 token 独立处理，不看其他 token。
@@ -455,14 +497,18 @@ MLP 的作用：膨胀到 4 倍维度 → 让模型有足够空间做非线性�
 class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.ln_1 = LayerNorm(768)          # Attention 前的归一化
+        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)   # Attention 前的归一化
         self.attn = CausalSelfAttention(config)
-        self.ln_2 = LayerNorm(768)          # MLP 前的归一化
+        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)   # MLP 前的归一化
         self.mlp  = MLP(config)
 
     def forward(self, x):
-        x = x + self.attn(self.ln_1(x))     # 归一化 → Attention → 残差加回
-        x = x + self.mlp(self.ln_2(x))      # 归一化 → MLP → 残差加回
+        # Pre-Norm 结构：先归一化 → 再计算 → 最后残差加回
+        # 两条路：
+        #   残差路径 (identity): x 原封不动往前传 → 梯度直接反向传播
+        #   变换路径: ln → attn/mlp → 输出加到残差上
+        x = x + self.attn(self.ln_1(x))   # Attention 子层
+        x = x + self.mlp(self.ln_2(x))    # MLP 子层
         return x
 ```
 
@@ -474,75 +520,147 @@ class Block(nn.Module):
 
 ## 第 7 章：GPT 类 —— 把积木拼起来
 
-### 7.1 组件清单
+### 7.1 组件清单 —— 逐行注释
 
 ```python
 class GPT(nn.Module):
     def __init__(self, config):
         super().__init__()
+        self.config = config
+
+        # ① wte: Word Token Embedding
+        #    参数矩阵 (vocab_size=50257, n_embd=768)
+        #    50257×768 ≈ 38.6M 参数 ← 这是参数量的大头！
+        #    输入 token ID → 返回第 token_id 行的 768 维向量
         self.transformer = nn.ModuleDict(dict(
-            wte  = nn.Embedding(50257, 768),     # Token Embedding
-            wpe  = nn.Embedding(1024, 768),       # Position Embedding
-            drop = nn.Dropout(0.1),               # Embedding dropout
-            h    = nn.ModuleList([Block(config) for _ in range(12)]),  # 12层Block
-            ln_f = LayerNorm(768),                # 最终归一化
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+
+            # ② wpe: Word Position Embedding
+            #    参数矩阵 (block_size=1024, n_embd=768)
+            #    1024×768 ≈ 0.79M 参数
+            #    输入位置编号 0..1023 → 返回对应行的 768 维向量
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+
+            # ③ drop: Embedding 级别的 dropout
+            #    施加在 tok_emb + pos_emb 的逐元素结果上
+            #    与 attention dropout、residual dropout 是三个不同的 dropout
+            drop = nn.Dropout(config.dropout),
+
+            # ④ h: 12 个 Block 的序列
+            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+
+            # ⑤ ln_f: Final LayerNorm（只在输出前做一次）
+            #    为什么叫 ln_f？final LayerNorm
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
-        self.lm_head = nn.Linear(768, 50257, bias=False)  # 输出投影
-        self.transformer.wte.weight = self.lm_head.weight # ← Weight Tying
+
+        # ⑥ lm_head: Language Model Head
+        #    参数矩阵 (n_embd=768, vocab_size=50257)
+        #    把 768 维 hidden state 映射回 50257 维 → 每个位置输出"下一个 token 的概率"
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+
+        # ⑦ Weight Tying: wte 和 lm_head 共享权重！
+        #    wte.weight 和 lm_head.weight 指向同一块内存
+        #    → 实际 lm_head 不占额外参数，省了 38.6M
+        self.transformer.wte.weight = self.lm_head.weight
+
+        # ⑧ 对所有 Linear 和 Embedding 做标准初始化（正态分布，std=0.02）
         self.apply(self._init_weights)
+
+        # ⑨ 对 c_proj 的权重做特殊缩放 —— "GPT-2 风格的初始化"
+        #    残差路径的投影权重额外除以 sqrt(2*n_layer)
+        #    让初始时残差贡献很小，模型从"近乎恒等映射"起步 → 不需要 lr warmup
+        for pn, p in self.named_parameters():
+            if pn.endswith('c_proj.weight'):
+                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * config.n_layer))
 ```
 
-### 7.2 Weight Tying：一个 38M 参数的优化
+### 7.2 Weight Tying —— 省了 38M 参数
 
 `wte` 做的事：token ID → 768 维向量 `lm_head` 做的事：768 维向量 → token ID 的 logits
 
 这两个矩阵互为转置。GPT-2 让它们共享权重——`wte.weight` 和 `lm_head.weight` 指向同一块内存。省了 38.6M 参数（约 1/3 的总大小），对训练还有正则化效果。现代 LLM 基本都这么做。
 
-### 7.3 forward：完整前向传播
+### 7.3 forward —— 完整前向传播
 
 ```python
-def forward(self, idx, targets=None):    # idx: (B, T) token IDs
-    tok_emb = self.transformer.wte(idx)  # (B, T, C) 查词表
-    pos_emb = self.transformer.wpe(torch.arange(T))  # (T, C) 查位置表
-    x = self.transformer.drop(tok_emb + pos_emb)      # 加在一起 + dropout
+def forward(self, idx, targets=None):
+    # idx: (B, T), 值为 token ID（整数）
+    # targets: (B, T) or None（训练时有、推理时没有）
+    device = idx.device
+    b, t = idx.size()
+    assert t <= self.config.block_size  # 序列不能超过最大上下文长度
 
-    for block in self.transformer.h:     # 过12层Block
-        x = block(x)
+    pos = torch.arange(0, t, dtype=torch.long, device=device)  # (T,) 位置序号 0,1,2...
 
-    x = self.transformer.ln_f(x)         # 最后归一化
-    logits = self.lm_head(x)             # (B, T, vocab_size)
+    # ===== ① Token Embedding + Position Embedding =====
+    tok_emb = self.transformer.wte(idx)  # (B, T) → (B, T, C=768)  查词表
+    pos_emb = self.transformer.wpe(pos)  # (T,) → (T, C=768)  查位置表
+    x = self.transformer.drop(tok_emb + pos_emb)
+    # tok_emb + pos_emb: (B, T, C) + (T, C) → (B, T, C)
+    # 广播：pos_emb 从 (T, C) 自动扩展到 (B, T, C)，每 batch 共享
+    # ← 为什么相加而不是拼接？拼接会让维度翻倍 → 后续所有层参数翻倍 → 浪费
 
-    if targets is not None:              # 训练模式：算loss
-        loss = F.cross_entropy(logits.view(-1, vocab_size), targets.view(-1))
+    # ===== ② 逐层过 Transformer Block =====
+    for block in self.transformer.h:
+        x = block(x)  # 每层：x = x + attn(ln_1(x)); x = x + mlp(ln_2(x))
+    # (B, T, C) 进，(B, T, C) 出，形状始终不变
+
+    # ===== ③ Final LayerNorm =====
+    x = self.transformer.ln_f(x)  # (B, T, C) 最后统一归一化
+
+    # ===== ④ 输出 logits =====
+    if targets is not None:
+        # 训练模式：算 logits + loss
+        logits = self.lm_head(x)  # (B, T, C) → (B, T, vocab_size)
+        # 交叉熵要求 (N, C) vs (N,) 的输入 → 把 B*T 个 token 展平
+        loss = F.cross_entropy(
+            logits.view(-1, logits.size(-1)),  # (B*T, vocab_size) 预测值
+            targets.view(-1),                   # (B*T,)          真实值
+            ignore_index=-1                     # -1 位置不参与 loss（padding 占位）
+        )
         return logits, loss
-    return logits, None                  # 推理模式：只返回logits
+    else:
+        # 推理模式：只返回 logits
+        logits = self.lm_head(x)
+        return logits, None
 ```
 
-Shape 追踪：
-```
-wte(idx):        (B,T) → (B,T,768)
-wpe(pos):        (T,)  → (T,768) 广播到 (B,T,768)
-相加 + drop:     (B,T,768)
-Block×12:        (B,T,768) 每层不变
-ln_f:            (B,T,768)
-lm_head:         (B,T,768) → (B,T,50257)
-view + CE loss:  (B*T, 50257) vs (B*T,) → scalar
-```
-
-### 7.4 generate：自回归生成
+### 7.4 generate —— 自回归生成
 
 ```python
-@torch.no_grad()  # 推理模式，不计算梯度
+@torch.no_grad()  # 关闭梯度计算——推理不需要反向传播，省显存
 def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    # idx: (B, T) 初始 prompt 的 token IDs
     for _ in range(max_new_tokens):
-        idx_cond = idx[:, -block_size:]   # 只保留最后1024个token
-        logits = self(idx_cond)           # 前向
-        logits = logits[:, -1, :] / temperature  # 只取最后一个位置！缩放
-        if top_k:                         # 只保留top-k个候选
-            logits[logits < topk_values] = -inf
-        probs = softmax(logits)           # 变成概率
-        idx_next = multinomial(probs, 1)  # 按概率采样下一个token
-        idx = cat([idx, idx_next])        # 拼回去
+        # ① 裁剪上下文：如果超长，只保留最后 block_size=1024 个 token
+        idx_cond = idx if idx.size(1) <= self.config.block_size \
+                   else idx[:, -self.config.block_size:]
+
+        # ② 前向传播，logits.shape = (B, T, vocab_size)
+        logits, _ = self(idx_cond)
+        # ③ 只取最后一个位置的 logits！
+        #    GPT 是因果的——知道前面所有 token 后，只要最后一个位置
+        #    就可以预测下一个 token。前面的 logits 不需要
+        logits = logits[:, -1, :]  # (B, vocab_size)
+
+        # ④ Temperature 缩放
+        #    T→0: 差异放大→接近 one-hot→贪婪解码（最确定）
+        #    T=1: 正常分布
+        #    T→∞: 差异抹平→接近均匀→随机输出
+        logits = logits / temperature
+
+        # ⑤ Top-K 过滤（可选）：只保留得分最高的 K 个候选
+        if top_k is not None:
+            v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+            logits[logits < v[:, [-1]]] = -float('Inf')  # 低分 token 置 -inf
+
+        # ⑥ Softmax → 概率 → 按概率采样
+        probs = F.softmax(logits, dim=-1)      # (B, vocab_size) 每行和=1
+        idx_next = torch.multinomial(probs, num_samples=1)  # 按概率随机抽一个 token
+
+        # ⑦ 拼接到序列末尾
+        idx = torch.cat((idx, idx_next), dim=1)  # (B, T+1)
     return idx
 ```
 
@@ -571,7 +689,70 @@ KV Cache 是推理显存的主要消耗——Llama-2 7B、上下文长度 4096�
 
 ---
 
-## 第 9 章：完整自测 24 题
+## 第 9 章：configure_optimizers —— 权重衰减的讲究
+
+```python
+def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
+    # ① 收集所有需要梯度的参数
+    param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
+
+    # ② 分成两组：做 weight decay 的和不做的一─
+    #    p.dim() >= 2: 矩阵参数（Linear.weight、Embedding.weight）→ 做 weight decay
+    #    p.dim() < 2:  向量参数（bias、LayerNorm.weight/bias）→ 不做 weight decay
+    decay_params   = [p for n, p in param_dict.items() if p.dim() >= 2]
+    nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+
+    optim_groups = [
+        {'params': decay_params,   'weight_decay': weight_decay},
+        {'params': nodecay_params, 'weight_decay': 0.0}
+    ]
+
+    # ③ 根据设备选 fused AdamW（GPU 上用 CUDA 后端，更快）
+    fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+    use_fused = fused_available and device_type == 'cuda'
+    optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate,
+                                  betas=betas, fused=use_fused)
+    return optimizer
+```
+
+### 为什么 bias 和 LayerNorm 不做 weight decay？
+
+```
+Weight decay = L2 正则化 → 把权重往 0 方向推
+
+Linear.weight / Embedding.weight:
+  权重矩阵应该防止过拟合 → 做 weight decay ✓
+
+bias:
+  只是一个偏移量，推到 0 没有意义 → 不做 weight decay
+
+LayerNorm.weight:
+  初始为 1，代表"不做任何缩放"。
+  如果推到 0 → 意味着"把整层输出归零" → 模型废了 → 不做 weight decay
+```
+
+> 面试口诀：**权重矩阵做 decay，偏置和归一化不做。**
+
+### 参数精确计算（面试验证用）
+
+| 组件 | 计算 | 参数量 |
+|------|------|:--:|
+| wte | 50257 × 768 | 38,597,376 |
+| wpe | 1024 × 768 | 786,432 |
+| 每层 Attn c_attn | 768 × 2304 + 2304(bias) | 1,771,776 |
+| 每层 Attn c_proj | 768 × 768 + 768 | 590,592 |
+| 每层 MLP c_fc | 768 × 3072 + 3072 | 2,362,368 |
+| 每层 MLP c_proj | 3072 × 768 + 768 | 2,360,064 |
+| 每层 LayerNorm ×2 | 2 × (768+768) | 3,072 |
+| 12 层合计 | 12 × 7,085,568 | 85,026,816 |
+| ln_f | 768 + 768 | 1,536 |
+| **总参数** | | **~124.4M** |
+
+> 面试心算：`C=768, C²≈590K, 12×C²≈7M, ×12层≈84M, +embedding≈124M`
+
+---
+
+## 第 10 章：完整自测 24 题
 
 > 闭卷做完再对答案。
 
