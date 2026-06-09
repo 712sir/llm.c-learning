@@ -832,3 +832,75 @@ LayerNorm.weight:
 - **vLLM 源码**：vLLM 的 ModelRunner、BlockManager 与 GPT-2 架构一一对应
 - **CUDA kernel**：理解 Attention 计算模式后，手写 GEMM/FlashAttention 才有优化目标
 - **面试复习**：24 道自测题 + 各章面试要点 = 系统回顾清单
+
+---
+
+## 🔨 手搓代码（白板 · 关掉 nanoGPT 源码）
+
+> ⚠️ 手搓规则：**关掉 nanoGPT/model.py，不参考任何代码。** 只允许看本笔记的概念解释和 data flow 图。每道题限时 60-90 分钟，超时才能看参考答案。
+
+### 🥇 白板题 1：手写 CausalSelfAttention（90min）
+
+**验收标准**：写出来的代码能跑通 `(B=2, T=8, C=64, n_head=4)` 的随机输入，输出 shape 正确。
+
+核心 checklist：
+- [ ] `__init__`：`c_attn`（Fused QKV，in=C, out=3C）、`c_proj`（out projection）、`register_buffer("bias", ...)` 下三角 causal mask，shape: `(1, 1, block_size, block_size)`
+- [ ] `forward`：10 步 shape 变化全链路（见第 4 章速查表）
+- [ ] `qkv.split` + `view + transpose` → 多头格式
+- [ ] `Q @ K^T / sqrt(d)` + causal mask（`masked_fill` with `-inf`）+ softmax
+- [ ] `att @ V` → `transpose + contiguous + view` 合并多头 → `c_proj`
+- [ ] 写完后对照 nanoGPT 源码：看哪里不一样？为什么？
+
+### 🥇 白板题 2：手写 GPT Block（60min）
+
+**验收标准**：输入 `(B, T, C)`，输出 `(B, T, C)`，shape 不变。
+
+核心 checklist：
+- [ ] `ln_1 → attn → residual add`
+- [ ] `ln_2 → mlp → residual add`
+- [ ] Pre-Norm 结构：先在每层输入做 LayerNorm，再进子层，最后加残差
+- [ ] MLP：`c_fc(C→4C) → GELU → c_proj(4C→C)`
+
+### 🥇 白板题 3：手写完整 GPT 前向传播（90min）
+
+**验收标准**：喂入 `(B=2, T=16)` 的 token IDs，跑完 forward 得到 `(B, T, vocab_size)` 的 logits。
+
+核心 checklist：
+- [ ] `wte` + `wpe` 相加（不是拼接）
+- [ ] Embedding dropout
+- [ ] 逐层过 blocks
+- [ ] `ln_f`
+- [ ] `lm_head` 输出 logits
+- [ ] **Weight Tying**：`lm_head.weight = wte.weight`（共享权重，省参数）
+- [ ] 用 `torch.ones(2, 16, dtype=torch.long)` 作为假输入跑一遍，确认不报错
+
+### 🥈 临摹题 1：手写 KV Cache 推理（60min）
+
+> 允许参考本笔记第 8 章的概念解释，但不允许看 nanoGPT 的 `generate` 方法。
+
+- [ ] 实现一个简化版 `generate_with_kv_cache`：维护 `cache_k` / `cache_v` 两个 list
+- [ ] 每步只算新 token 的 Q，拿缓存里的 K、V 做 Attention
+- [ ] 验证：有 KV Cache 和无 KV Cache 生成的文本完全一致
+
+### 代码位置
+
+手搓产物放在 `d:\study\llm.c-learning\experiments\handwrite-gpt\`：
+
+```
+handwrite-gpt/
+├── attention.py      # 白板题1：CausalSelfAttention
+├── block.py          # 白板题2：GPT Block
+├── gpt.py            # 白板题3：完整 GPT forward
+├── kv_cache.py       # 临摹题1：KV Cache 推理
+└── test_all.py       # 跑通以上所有模块的正确性验证
+```
+
+### 什么时候做
+
+| 题 | 时机 | 优先级 |
+|----|------|:--:|
+| 白板 1-2 | **今晚**夜班，精读完第 4-6 章后立刻手搓 | 🔴 |
+| 白板 3 | 明天白天 | 🟡 |
+| 临摹 1 | 周末，读完第 8 章后 | 🟢 |
+
+> 面试官问的不是 "你看过 nanoGPT 吗"，而是 **"你能在白板上写出 Attention 吗"**。这 4 道题做完，面试时直接默写。

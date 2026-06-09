@@ -546,7 +546,108 @@ Loss 下降曲线（关键节点）：
 
 ---
 
-## Wandb 可视化（Week 2 补完）
+## Day 4-5：AutoDL Shakespeare 5000 步完整训练
+
+> 2026-06-10 完成 | 产物：[experiments/shakespeare-5000/](../experiments/shakespeare-5000/)
+
+### 环境
+
+| 项目 | 详情 |
+|------|------|
+| **平台** | AutoDL (SeetaCloud) |
+| **GPU** | RTX 4090，24 GB 显存 |
+| **磁盘** | 系统盘 30 GB（overlay） |
+| **Python** | 3.8.10 (miniconda3) |
+| **PyTorch** | 2.0.0+cu118 |
+| **SSH** | `ssh -p 53322 root@connect.westb.seetacloud.com` |
+| **Wandb** | offline 模式（无 API key，本地保存日志） |
+
+### 环境搭建
+
+```bash
+# 1. conda 激活
+source /root/miniconda3/etc/profile.d/conda.sh && conda activate base
+
+# 2. 克隆 + 装依赖
+cd /root && git clone https://github.com/karpathy/nanoGPT.git
+pip install tiktoken wandb -q
+
+# 3. 准备莎士比亚数据集
+cd /root/nanoGPT/data/shakespeare_char && python prepare.py
+# train 1,003,854 tokens / val 111,540 tokens / vocab 65 chars
+```
+
+### 训练配置
+
+Baby GPT ~30M 参数，与 Day 1 同一 config，区别是 RTX 4090 显存充足，用满默认配置：
+
+| 参数 | Day 1 (GTX 1650) | Day 4-5 (RTX 4090) |
+|------|:--:|:--:|
+| batch_size | 4 | 64 |
+| block_size | 64 | 256 |
+| 每步 tokens | 256 | 16,384 |
+| max_iters | 100 | 5000 |
+| 每步耗时 | ~17ms | ~27ms |
+
+启动：
+```bash
+cd /root/nanoGPT
+WANDB_MODE=offline nohup python train.py config/train_shakespeare_char.py \
+    --wandb_log=True --wandb_run_name=shakespeare-5000 \
+    > train_5000.log 2>&1 &
+```
+
+### 训练结果
+
+完整 loss 曲线（每 250 步 eval）：
+
+```
+step     0: train 4.2874  val 4.2823    ← 初始，≈ ln(65)
+step   250: train 1.9725  val 2.0774
+step   500: train 1.5317  val 1.7292
+step   750: train 1.3651  val 1.5908
+step  1000: train 1.2814  val 1.5352
+step  1250: train 1.2070  val 1.5103
+step  1500: train 1.1529  val 1.4841
+step  1750: train 1.1043  val 1.4704    ← 🏆 最佳 val loss
+step  2000: train 1.0555  val 1.4791    ← 开始过拟合
+step  2500: train 0.9609  val 1.4944
+step  3000: train 0.8653  val 1.5320
+step  3500: train 0.7826  val 1.5831
+step  4000: train 0.7086  val 1.6378
+step  4500: train 0.6527  val 1.6880
+step  5000: train 0.6234  val 1.7133
+```
+
+| 指标 | 值 |
+|------|-----|
+| Final Train Loss | **0.6234** |
+| Final Val Loss | 1.7133 |
+| Best Val Loss | **1.4704**（step 1750） |
+| 总耗时 | ~3 分钟 |
+| MFU | ~14% |
+| Checkpoint | [ckpt.pt](../experiments/shakespeare-5000/ckpt.pt)（129 MB） |
+| 训练日志 | [train_5000.log](../experiments/shakespeare-5000/train_5000.log)（597 行） |
+
+### 解读
+
+**1. 过拟合出现在 step 1750。** train loss 一直下降到 0.62，但 val loss 从 1.47 反弹到 1.71。Shakespeare 只有 1MB / 100 万 tokens，30M 模型跑 5000 步 × 16,384 token/step ≈ 8200 万 token ≈ 82 个 epoch，严重过拟合。最优模型在 step 1750。
+
+**2. 与 Day 1 1000 步对比。** Day 1 的 val loss 最低 2.50（batch_size=4, block_size=64），这次用满默认配置（64/256）后 val loss 降到 1.47，每步处理 64 倍数据，收敛质量大幅提升。
+
+**3. MFU 14%。** 30M 小模型计算量小，GPU 大量时间在 kernel launch 开销上。大模型 MFU 能到 27%+。
+
+### 踩坑
+
+| 问题 | 解决 |
+|------|------|
+| 数据集放错目录（`shakespeare/` vs `shakespeare_char/`） | 在正确目录重新 prepare |
+| Wandb 无 API key | `WANDB_MODE=offline`，本地保存 |
+| 本地 paramiko 通过密码连 SSH 可用 | — |
+
+---
+
+## Wandb 可视化
 
 > 此前训练均使用 `wandb_log=False`，未记录可视化数据。本次补跑 500 步 Shakespeare 短训练，启用 wandb 日志，生成本地可视化图表。
 
@@ -594,7 +695,7 @@ Wandb 在线：https://wandb.ai/models-hefei-university-of-technology/shakespear
 - [√] OpenWebText 数据集：国内网络无法下载（HF 直连+镜像均失败），改用 WikiText-103 在 AutoDL 上完成
 - [√] AutoDL GPT-2 (124M) 完整训练：5000 步，val loss 3.05，4.5h，checkpoint 1.4GB
 - [√] `sample.py` 在充分训练的模型上生成可读文本（T=0.6/0.8/1.0 三组对比，T=0.8 最佳）
-- [√] Wandb 可视化的截图保存（Week 2 完成）
+- [√] Wandb 可视化的截图保存
   - 跑 500 步 Shakespeare 短训练，`wandb_log=True`，生成 6 张可视化图表
   - 产物：[experiments/gpt2-wikitext/wandb-screenshots/](../experiments/gpt2-wikitext/wandb-screenshots/)（6 张 PNG + 1 个 run_info.txt）
   - Wandb 在线地址：https://wandb.ai/models-hefei-university-of-technology/shakespeare-char/runs/1ugkht12

@@ -1,0 +1,31 @@
+WandB Run Summary
+====================
+Run: shakespeare-5000
+Project: shakespeare-char
+Platform: AutoDL RTX 4090 24GB (WANDB_MODE=offline)
+
+Training Config:
+  dataset: shakespeare_char (1,003,854 train / 111,540 val tokens)
+  model: 10.65M params (6 layers, 6 heads, 384 dim)
+  batch_size: 64
+  block_size: 256
+  tokens_per_iter: 16,384
+  max_iters: 5000
+  learning_rate: 0.001 (cosine to 0.0001)
+  warmup_iters: 100
+  dropout: 0.2
+  compile: False
+
+Final Metrics:
+  train_loss (final): 0.6234
+  val_loss (final): 1.7133
+  best_val_loss: 1.4704 (step 1750)
+  iter_time (avg): 23.1 ms
+  MFU (avg): 15.8%
+  total_time: ~3 min
+
+Key Insight:
+  Overfitting starts at step 1750-2000. Best model is at step 1750
+  with val loss 1.4704. Final model at step 5000 has train loss
+  0.6234 but val loss worsened to 1.7133.
+  Use step 1750 checkpoint for generation, not step 5000.

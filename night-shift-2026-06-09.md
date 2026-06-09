@@ -1,10 +1,10 @@
 # 🌙 夜班学习计划 — 2026-06-09（周一）
 
-> 总时长：~1.5h | 主线：B1 CUDA 线程模型巩固 + Shared Memory 预习
+> 总时长：~2.5h | 主线：C llm.c Week 2 手搓 Attention + B1 CUDA Ch2 收尾
 >
 > 📦 **白天已完成**：Softmax CUDA kernel v1-v4 · B2 C++ BoundedBlockingQueue · B2 Python asyncio 实战 · Course Ch2 笔记
 >
-> ⚠️ **新调整**（见 plan-v2）：D 线 cs224n + E 线 vLLM 暂停，聚焦 B1 CUDA。C 线随 B 线推进，不独立排时间。
+> ⚠️ **今晚调整**：Week 2 笔记已完成阅读，**今晚重点是手搓代码**——关掉 nanoGPT，白板写出 CausalSelfAttention。读十遍不如写一遍。
 
 ---
 
@@ -12,82 +12,80 @@
 
 | # | 线 | 内容 | 载体 | ⏱ |
 |:--:|:--:|------|------|:--:|
-| 1 | B1 | CUDA 课程 Ch2 线程/内存模型精读 | 📝 笔记 | 30min |
-| 2 | B1 | Shared Memory + Bank Conflict 预习 | 📝 笔记 | 25min |
-| 3 | B2 | 白天 C++ 多线程 + Python asyncio 回顾 | 🧠 闭卷 | 15min |
-| 4 | A | 链表回顾 + 数组拓展题思路 | 🧠 脑刷 | 10min |
-| 5 | 🎯 | 对齐 plan-v2：本周目标确认 | 📋 5min |
+| 1 | 🔨 C | **白板手搓 CausalSelfAttention** | 关掉 nanoGPT，从零写 | 60-90min |
+| 2 | B1 | CUDA Ch2 线程/内存模型精读（收尾） | 📝 闭卷画图 | 20min |
+| 3 | B1 | Softmax kernel 编译验证 | `nvcc softmax_v1_to_v4.cu` | 10min |
+| 4 | A | 数组拓展题 LC35 + LC34（脑刷思路） | 🧠 不写代码 | 10min |
+| 5 | 🎯 | 复盘 | 📋 | 5min |
 
-> **合计：~1h25min** | 📝 笔记 55min · 🧠 自测/脑刷 25min · 📋 规划 5min
-
----
-
-## 一、B1 — CUDA 课程 Ch2 线程/内存模型精读（30min）
-
-> 📝 [ch02-thread-memory-model.md](ai-infra-career/fundamentals/cuda/course/ch02-thread-memory-model.md)
-
-| # | 内容 | ✅ |
-|:--:|------|:--:|
-| 1.1 | §一 GPU 硬件结构：SM 内部组件 + 各指标数据（A100 vs GTX 1650） | ⬜ |
-| 1.2 | §二 三级线程组织：闭卷画 Grid→Block→Thread 层级图 | ⬜ |
-| 1.3 | §二 全局索引公式：1D/2D/3D 各写一遍 | ⬜ |
-| 1.4 | §三 Warp：最小调度单元 = 32 threads，Divergence 什么时候真正影响性能？ | ⬜ |
-| 1.5 | §三 Latency Hiding：GPU 靠什么隐藏内存延迟？为什么需要几万个线程？ | ⬜ |
-| 1.6 | §四 内存层次：Register→Shared→L1→L2→Global 延迟倍数默写 | ⬜ |
-| 1.7 | §六 自测 6 题（闭卷！） | ⬜ |
+> **合计：~2h15min** | 🔨 手搓 90min · 📝 笔记 20min · 🧠 脑刷 10min · 📋 复盘 5min
 
 ---
 
-## 二、B1 — Shared Memory + Bank Conflict 预习（25min）
+## 一、🔨 白板手搓 CausalSelfAttention（60-90min）
 
-> 📝 [shared-memory-bank-conflict.md](ai-infra-career/fundamentals/cuda/shared-memory-bank-conflict.md)
+> 📋 [week2-model-forward.md § 手搓代码](../notes/week2-model-forward.md)
 >
-> ⚠️ 今晚只读 §一~§三，Tiled GEMM（§四）留到明天白天手撕。
+> ⚠️ **关掉 nanoGPT/model.py。** 只允许看 Week 2 笔记第 4 章的概念解释和 data flow 图。
 
-| # | 内容 | ✅ |
+**验收标准**：`(B=2, T=8, C=64, n_head=4)` 的随机输入跑通，输出 shape = `(2, 8, 64)`。
+
+| # | 步骤 | ✅ |
 |:--:|------|:--:|
-| 2.1 | §一 内存层次全景图：Shared Memory 在什么位置？为什么比 Global Memory 快 ~100×？ | ⬜ |
-| 2.2 | §二 Shared Memory 基础：`__shared__` 声明 + `__syncthreads()` 什么时候必须用？ | ⬜ |
-| 2.3 | §二 死锁风险：同一个 warp 内不同线程走不同分支调 `__syncthreads()` = 死锁 | ⬜ |
-| 2.4 | §三 Bank Conflict：32 banks / 4B per bank，什么访问模式会产生 conflict？ | ⬜ |
-| 2.5 | §三 3 种情况 + Padding 解法：stride=1 / stride=32 / random | ⬜ |
-| 2.6 | 思考：今天写的 Softmax v1 kernel，两次 `block_reduce` 有 bank conflict 吗？ | ⬜ |
+| 1.1 | `__init__`：`c_attn`（768→2304）+ `c_proj`（768→768）+ causal mask buffer | ⬜ |
+| 1.2 | forward step 1：`c_attn(x)` → split → Q, K, V 各 (B,T,C) | ⬜ |
+| 1.3 | forward step 2-3：view+transpose → Q@K^T / √d → (B,nh,T,T) | ⬜ |
+| 1.4 | forward step 4-5：causal mask（`masked_fill(-inf)`）+ softmax | ⬜ |
+| 1.5 | forward step 6-7：att@V → transpose+contiguous+view → c_proj | ⬜ |
+| 1.6 | 跑通测试：`torch.randn(2,8,64)` 输入，输出 shape 正确 | ⬜ |
+| 1.7 | 打开 nanoGPT/model.py 对比：哪里写的不一样？为什么？ | ⬜ |
+
+> 产物放在 `d:\study\llm.c-learning\experiments\handwrite-gpt\attention.py`
 
 ---
 
-## 三、B2 — 白天产出回顾（15min）
+## 二、B1 — CUDA Ch2 收尾（20min）
 
-> 📝 闭卷自测，不翻代码
-
-| # | 内容 | ✅ |
-|:--:|------|:--:|
-| 3.1 | C++：`lock_guard` 和 `unique_lock` 的区别？为什么要用 `while` 而不是 `if` 检查条件？ | ⬜ |
-| 3.2 | C++：`memory_order_relaxed` / `acquire` / `release` / `seq_cst` 各自适用场景？ | ⬜ |
-| 3.3 | Python：`asyncio.gather` vs `create_task` 的区别？ | ⬜ |
-| 3.4 | Python：CPU 密集任务在 asyncio 里怎么办？（关键词：`run_in_executor`） | ⬜ |
-| 3.5 | Python：`asyncio.Queue` 为什么不需要 mutex？（关键词：单线程协作式） | ⬜ |
-
----
-
-## 四、A — 链表回顾 + 数组拓展（10min）
+> 今晚重点是手搓，CUDA 只做最小收尾
 
 | # | 内容 | ✅ |
 |:--:|------|:--:|
-| 4.1 | 链表技巧速查：虚拟头 / 快慢指针 / 双指针换轨 / 头插法 | ⬜ |
-| 4.2 | LC24 两两交换：脑中画图模拟 dummy→1→2→3 → dummy→2→1→3 | ⬜ |
-| 4.3 | 数组拓展题预告（本周 A 线）：LC35 搜索插入位置 / LC34 查找边界 / LC26 删除重复项 | ⬜ |
+| 2.1 | 闭卷画 Grid→Block→Thread 层级图（3 级） | ⬜ |
+| 2.2 | 写出 1D/2D 全局索引公式 | ⬜ |
+| 2.3 | 内存层次延迟默写：Register(0) → Shared(~20) → L1(~100) → L2(~200) → Global(~500-800) | ⬜ |
 
 ---
 
-## 五、🎯 对齐 plan-v2（5min）
+## 三、B1 — Softmax kernel 编译验证（10min）
 
-> 📋 [plan-v2-iterative.md](ai-infra-career/plan-v2-iterative.md)
+```bash
+cd d:\study\ai-infra-career\fundamentals\cuda\kernels\03-softmax
+nvcc softmax_v1_to_v4.cu -o softmax_test
+./softmax_test
+```
 
-| # | 检查 | ✅ |
-|:--:|------|:--:|
-| 5.1 | 本周目标确认：Grid/Block/Thread 模型 + 飞书 CUDA Ch1-2 完成 | ⬜ |
-| 5.2 | 今天推进了什么？CUDA 方面比昨天进了一步吗？ | ⬜ |
-| 5.3 | 明天最重要的 1 件事：装好 MSVC C++ 工作负载 → 编译 Softmax kernel | ⬜ |
+确认 v1-v4 输出与 CPU 基线一致。
+
+---
+
+## 四、A — 数组拓展题脑刷（10min）
+
+| # | 题 | 思路 | ✅ |
+|:--:|------|------|:--:|
+| 4.1 | LC35 搜索插入位置 | 二分查找，找第一个 ≥ target 的位置 | ⬜ |
+| 4.2 | LC34 排序数组查找边界 | 两次二分：找左边界 + 右边界 | ⬜ |
+
+> 今晚只脑刷思路，不写代码。白天补代码。
+
+---
+
+## 五、复盘（5min）
+
+| # | 问题 | 答案 |
+|:--:|------|------|
+| 5.1 | Attention 写出来了吗？卡在哪个 step？ | |
+| 5.2 | CUDA 三层线程能闭卷画出来吗？ | |
+| 5.3 | 明天白天最重要的 1 件事 | |
 
 ---
 
@@ -95,29 +93,19 @@
 
 | # | 线 | 内容 | ⏱ | ✅ |
 |:--:|:--:|------|:--:|:--:|
-| 1 | B1 | CUDA Ch2 线程/内存模型精读 | 30min | ⬜ |
-| 2 | B1 | Shared Memory + Bank Conflict 预习 | 25min | ⬜ |
-| 3 | B2 | C++ 多线程 + Python asyncio 自测 | 15min | ⬜ |
-| 4 | A | 链表回顾 + 数组拓展 | 10min | ⬜ |
-| 5 | 🎯 | 对齐 plan-v2 | 5min | ⬜ |
+| 1 | 🔨 C | 白板手搓 CausalSelfAttention | 60-90min | ⬜ |
+| 2 | B1 | CUDA Ch2 收尾（画图+索引+内存层次） | 20min | ⬜ |
+| 3 | B1 | Softmax kernel 编译验证 | 10min | ⬜ |
+| 4 | A | LC35+LC34 脑刷思路 | 10min | ⬜ |
+| 5 | 🎯 | 复盘 | 5min | ⬜ |
 
 ---
 
 ## 🔜 明天白天
 
-| 线 | 任务 | 对应夜班 |
-|:--:|------|:--:|
-| 🛠️ | **装 VS 2022 C++ 桌面开发工作负载** | — |
-| B1 | 编译验证 Softmax v1-v4 kernel | #1, #2 |
-| B1 | 手写 MatMul naive kernel（白板！） | #2 |
-| A | 数组拓展题：LC35 + LC34 + LC26 | #4 |
-
----
-
-## 💡 问题记录区
-
-| # | 线 | 问题 |
-|:--:|:--:|------|
-| 1 | B1 | |
-| 2 | | |
-| 3 | | |
+| 线 | 任务 | 说明 |
+|:--:|------|------|
+| 🔨 C | 继续手搓：GPT Block（白板题2）+ GPT forward（白板题3） | 如果今晚 Attention 写通了 |
+| B1 | 手写 MatMul naive kernel | CUDA 路线本月目标 |
+| A | 数组拓展题：LC35 + LC34 + LC26（C++ + Python） | 代码落实 |
+| 🏃 | 跑步 15min | |
