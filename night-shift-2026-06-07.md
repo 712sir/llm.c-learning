@@ -1,6 +1,6 @@
 # 🌙 夜班学习计划 — 2026-06-07（周日）
 
-> 总时长：~2.5h | 主线：C 线 GPT-2 源码 + B1 Shared Memory + D 线预热
+> 总时长：~1h50min | 主线：C 线 GPT-2 源码 + B1 Shared Memory
 
 ---
 
@@ -11,10 +11,9 @@
 | 1 | C | GPT-2 Day1: LayerNorm + CausalSelfAttention | 📝 笔记 | 40min |
 | 2 | C | GPT-2 Day2: MLP + Block + GPT + generate | 📝 笔记 | 35min |
 | 3 | B1 | CUDA Shared Memory + Bank Conflict | 📝 笔记 | 30min |
-| 4 | D | cs224n Lec1: NLP 导论 | 🎬 视频 | 40min |
-| 5 | A | 链表脑刷 | 🧠 LeetCode | 10min |
+| 4 | A | 链表脑刷 | 🧠 LeetCode | 10min |
 
-> **合计：~2h35min** | 📝 阅读 105min · 🎬 视频 40min · 🧠 脑刷 10min
+> **合计：~1h50min** | 📝 阅读 100min · 🧠 脑刷 10min
 
 ---
 
@@ -61,19 +60,7 @@
 
 ---
 
-## 四、D 线 — cs224n Lec1 预热（40min）
-
-> 🎬 B站搜「cs224n 2024」第一讲
-
-| # | 内容 | ✅ |
-|:--:|------|:--:|
-| 4.1 | NLP 历史：规则 → 统计 → 神经网络 | ⬜ |
-| 4.2 | Word2Vec 动机：为什么需要分布式表示？One-hot 有什么问题？ | ⬜ |
-| 4.3 | 课程概览：Assignment / 项目 / 评分 | ⬜ |
-
----
-
-## 五、A 线 — 链表脑刷（10min）
+## 四、A 线 — 链表脑刷（10min）
 
 | # | 内容 | ✅ |
 |:--:|------|:--:|
@@ -89,8 +76,7 @@
 | 1 | C | GPT-2 Day1 | 40min | ⬜ |
 | 2 | C | GPT-2 Day2 | 35min | ⬜ |
 | 3 | B1 | Shared Memory | 30min | ⬜ |
-| 4 | D | cs224n Lec1 | 40min | ⬜ |
-| 5 | A | 链表脑刷 | 10min | ⬜ |
+| 4 | A | 链表脑刷 | 10min | ⬜ |
 
 ---
 
