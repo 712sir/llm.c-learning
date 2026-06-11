@@ -112,15 +112,25 @@ x.view(B, T, C)     # 改变形状，要求连续内存
 x.split(768, dim=2) # 沿 dim=2 切分
 ```
 
-**stride 举例**：`shape(2,3) stride(3,1)` — 内存里 6 个数挨着排 `[a,b,c,d,e,f]`，逻辑 2×3：
+**transpose → contiguous → view 用最小例子走一遍**：
 
+```python
+x = torch.tensor([[1,2,3],
+                  [4,5,6]])        # shape (2,3)，内存 = [1,2,3,4,5,6]
+
+y = x.transpose(0,1)               # shape (3,2)，内存还是 [1,2,3,4,5,6] 没变
+# y 逻辑上长这样：
+#   [1, 4]
+#   [2, 5]
+#   [3, 6]
+
+y.view(6)   # 报错！view 期望内存顺序是 [1,4,2,5,3,6]，但实际是 [1,2,3,4,5,6]
+
+z = y.contiguous()                 # 拷贝一份，内存变成 [1,4,2,5,3,6]
+z.view(6)   # OK，输出 [1,4,2,5,3,6]
 ```
-行0: a b c    行1: d e f
-```
 
-第0维（行）跨 3 个元素，第1维（列）跨 1 个。取 `[1][2]` = 起始 1×3+2×1 = 位置5 = f。
-
-**view 举例**：`x.view(2,3,4)` — 假设原来 24 个数扁的，view 后读成 2×3×4 三维。不改内存，只改解读方式。如果之前 transpose 过，物理顺序是旧的，stride 已改，view 就报错——需要先 `.contiguous()`。
+> transpose 改的是"怎么看"（stride），不拷数据。contiguous() 改的是"怎么存"（拷贝重排）。view 要求内存连续，所以 transpose 之后必须先 contiguous() 再 view。
 
 ### 2.5 `register_buffer` — 不学但跟着模型走
 
