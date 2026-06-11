@@ -800,39 +800,51 @@ LayerNorm.weight:
 
 ## 第 10 章：自测题
 
-> 闭卷做完再对答案。
+> 闭卷做完，再对答案。答案均在前面各章 + FAQ 中。
 
-**LayerNorm 部分**
-1. LayerNorm 的 eps=1e-5，写成 1e-8 为什么不行？
-2. 减均值和除标准差各自解决什么问题？
-3. RMSNorm 去掉了哪一步？凭什么敢去掉？
+### 10.1 LayerNorm（Q1-Q3）
 
-**CausalSelfAttention 部分**
-4. 默写 Q、K、V 从 `(B,T,C)` 到 `(B,nh,T,hs)` 的 view+transpose 过程
-5. `Q@K^T` 的 shape 是什么？`att[0][0][3][5]` 的含义是什么？
-6. 为什么除以 √hs？不除会怎样？
-7. causal mask 怎么工作的？为什么用 -inf 而不是 -1e9？
-8. transpose 后为什么必须 `contiguous()` 才能 `view()`？
-9. Fused QKV 比独立三个 Linear 好在哪？
-10. `c_proj` 维度是 (768,768)，看起来没有变化，为什么还要这一步？
-11. 训练时 attention dropout=0.1，推理时呢？谁控制的？
-12. flash attention 和标准 attention 的计算结果一样吗？
-13. T=2048 时，`Q@K^T` 矩阵多大（fp16，MB）？
-14. MHA vs MQA vs GQA 的核心区别？为什么推理引擎喜欢 GQA？
+| # | 问题 | 答案要点 |
+|:--:|------|------|
+| 1 | eps=1e-5，写成 1e-8 为什么不行？ | FP16 最小有效数字约 6e-5，1e-8 精度不够会被吞掉 |
+| 2 | 减均值和除标准差各自解决什么？ | 减均值→中心化（消除范数差异）；除标准差→统一尺度（防止内积不正当优势） |
+| 3 | RMSNorm 去掉了哪一步？凭什么？ | 去掉了减均值。实验发现减均值贡献很小但消耗 ~10-15% 计算。LLaMA/Mistral 已全面采用 |
 
-**MLP + Block 部分**
-15. MLP 为什么膨胀 4 倍？
-16. GELU vs ReLU 的核心区别？
-17. Pre-Norm vs Post-Norm：画图 + 说明为什么现代 LLM 全用 Pre-Norm。
+### 10.2 CausalSelfAttention（Q4-Q14）
 
-**GPT + generate 部分**
-18. "Weight Tying" 省了多少参数？为什么可以省？
-19. forward 中 `logits.view(-1, vocab_size)` 的 -1 是多少？
-20. generate 为什么只取 `logits[:, -1, :]`？
-21. KV Cache 让推理从 O(?) 变成 O(?)？
-22. 哪些参数不做 weight decay？为什么？
-23. `c_proj` 的初始化为什么特别小（除以 sqrt(2*n_layer)）？
-24. 写出 GPT-2 124M 的总参数估算过程。
+| # | 问题 | 答案要点 |
+|:--:|------|------|
+| 4 | 默写 Q/K/V 从 `(B,T,C)` 到 `(B,nh,T,hs)` 的 view+transpose | `view(B,T,nh,hs).transpose(1,2)` — 先拆多头，再交换 B 和 nh 的维度位置 |
+| 5 | `Q@K^T` 的 shape？`att[0][0][3][5]` 含义？ | shape=(B,nh,T,T)。`att[0][0][3][5]` = batch0、head0 中，token3 对 token5 的注意力原始分数 |
+| 6 | 为什么除以 √hs？不除会怎样？ | Q@K^T 方差=hs。不除→softmax 过尖锐→梯度消失。除了→方差归一化→训练稳定 |
+| 7 | causal mask 怎么工作？为什么用 -inf 不是 -1e9？ | 下三角保留，上三角置 -inf。用 -1e9 不够小——大 T 时 softmax 可能残留非零概率。-inf 保证 softmax(-inf)=0 |
+| 8 | transpose 后为什么必须 `contiguous()` 才能 `view()`？ | transpose 只改 stride 不改内存→不连续。view 要求连续内存才能重新解读形状 |
+| 9 | Fused QKV 比独立三个 Linear 好在哪？ | 一次矩阵乘法同时算 Q/K/V，比分开三次省两次 kernel launch。vLLM/TensorRT-LLM 全用 |
+| 10 | `c_proj` 维度 (768,768) 没变化，为什么还要？ | 各头独立算完的结果需要跨头混合——c_proj 的权重提供信息重组。6个头=6份报告，c_proj=主编 |
+| 11 | 训练时 dropout=0.1，推理时呢？谁控制？ | 推理时 dropout 自动关闭。`model.eval()` 控制——nn.Dropout 在 eval 模式下自动 bypass |
+| 12 | FlashAttention 和标准 Attention 结果一样吗？ | 数学上等价（近似在浮点精度内），显存占用 O(N) vs O(N²)。PyTorch 2.0+ 已内置 |
+| 13 | T=2048 时 `Q@K^T` 矩阵多大（fp16）？ | 2048×2048×2 字节 = 8MB。12 层 × 12 头 = 144 个这样的矩阵 = ~1.15GB |
+| 14 | MHA vs MQA vs GQA？为什么推理喜欢 GQA？ | MHA：每头独立 KV；MQA：全共享 KV；GQA：分组共享。GQA 让 KV Cache 缩小 2-8 倍 |
+
+### 10.3 MLP + Block（Q15-Q17）
+
+| # | 问题 | 答案要点 |
+|:--:|------|------|
+| 15 | MLP 为什么膨胀 4 倍？ | 给模型足够空间做非线性变换，4 倍是 Transformer 论文实验调出来的。LLaMA 用 SwiGLU 约 2.67× |
+| 16 | GELU vs ReLU 核心区别？ | ReLU：x<0 直接归零（死神经元风险）；GELU：处处光滑，x<0 也有小梯度。深层网络对梯度流敏感→用 GELU |
+| 17 | Pre-Norm vs Post-Norm？为什么全用 Pre-Norm？ | Pre-Norm：先归一化再计算→梯度通过残差路径直传浅层→不需 lr warmup。Post-Norm 反之 |
+
+### 10.4 GPT + generate（Q18-Q24）
+
+| # | 问题 | 答案要点 |
+|:--:|------|------|
+| 18 | Weight Tying 省了多少参数？为什么可以省？ | 省了 ~38.6M（约 1/3 总参数）。wte 和 lm_head 互为转置，共享权重对训练还有正则化效果 |
+| 19 | `logits.view(-1, vocab_size)` 的 -1 是多少？ | -1 = B×T。训练时把所有 batch 所有位置的 token 展平，和 targets 逐 token 算交叉熵 |
+| 20 | generate 为什么只取 `logits[:, -1, :]`？ | GPT 是因果的——前面 token 的 hidden state 已知，只需最后一个位置预测下一个 token。有 KV Cache 时前面已缓存，不重算 |
+| 21 | KV Cache 让推理从 O(?) 变成 O(?)？ | 无 KV Cache：O(N²)；有 KV Cache：O(N)。N 个 token 生成，每次都重算整个序列 vs 只算新 token |
+| 22 | 哪些参数不做 weight decay？为什么？ | bias 和 LayerNorm.weight。bias 推到 0 无意义；LN.weight 初始为 1（恒等），推到 0 会废掉整层 |
+| 23 | `c_proj` 初始化为什么除以 sqrt(2×n_layer)？ | GPT-2 风格初始化——让残差路径贡献初始很小，模型从"近乎恒等"起步→不需要 lr warmup |
+| 24 | 写出 GPT-2 124M 总参数估算 | wte(~38.6M) + wpe(~0.79M) + 12×(C²×4 + C² + C²×4 + C²)(~7.09M) ≈ 124M。面试心算：`C=768, 12×C²≈7M×12≈84M + embedding≈124M` |
 
 ---
 
