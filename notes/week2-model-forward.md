@@ -752,7 +752,7 @@ LayerNorm.weight:
 
 ---
 
-## 第 10 章：完整自测 24 题
+## 第 10 章：自测题
 
 > 闭卷做完再对答案。
 
@@ -810,7 +810,43 @@ LayerNorm.weight:
 
 ---
 
-## 附录 C：学完有什么用
+## 附录 C：参数速查表
+
+| 缩写 | 全称 | shape (GPT-2 124M) | 作用 |
+|------|------|------|------|
+| `wte` | Word Token Embedding | (50257, 768) | token ID → 768维向量 |
+| `wpe` | Word Position Embedding | (1024, 768) | 位置编号 → 768维向量 |
+| `c_attn` | Combined Attention (Fused QKV) | (768, 2304) | 输入 → QKV拼接 (3×768) |
+| `c_proj` | Combined Projection (Attn输出) | (768, 768) | 各头信息跨头混合 |
+| `c_fc` | Combined Fully-Connected (MLP第一层) | (768, 3072) | 膨胀到4倍 (768→3072) |
+| `c_proj`(mlp) | Combined Projection (MLP第二层) | (3072, 768) | 压缩回来 (3072→768) |
+| `ln_1` | LayerNorm (Attn前) | (768,) | 归一化 |
+| `ln_2` | LayerNorm (MLP前) | (768,) | 归一化 |
+| `ln_f` | LayerNorm Final | (768,) | 最后一层归一化 |
+| `lm_head` | Language Model Head | (768, 50257) | hidden → logits (与wte共享权重) |
+
+## 附录 D：源码函数速查
+
+| 函数 | 文件 | 行范围 | 做什么 |
+|------|------|--------|--------|
+| `LayerNorm.__init__` | model.py | ~30 | 初始化 weight(γ)、bias(β) |
+| `LayerNorm.forward` | model.py | ~40 | 减均值→除标准差→乘γ加β |
+| `CausalSelfAttention.__init__` | model.py | ~55 | Fused QKV、c_proj、causal mask(buffer)、两种dropout |
+| `CausalSelfAttention.forward` | model.py | ~70 | 10步：QKV→多头→scores→mask→softmax→加权→合并→c_proj |
+| `MLP.__init__` | model.py | ~105 | c_fc(768→3072)、GELU、c_proj(3072→768) |
+| `MLP.forward` | model.py | ~112 | c_fc→gelu→c_proj→dropout |
+| `Block.__init__` | model.py | ~120 | ln_1、attn、ln_2、mlp (Pre-Norm) |
+| `Block.forward` | model.py | ~125 | x = x + attn(ln_1(x)); x = x + mlp(ln_2(x)) |
+| `GPT.__init__` | model.py | ~135 | wte、wpe、drop、h(12×Block)、ln_f、lm_head、Weight Tying、初始化 |
+| `GPT.forward` | model.py | ~170 | embedding相加→12层Block→ln_f→lm_head→loss or logits |
+| `GPT.generate` | model.py | ~220 | 逐token生成：裁剪→前向→取最后→temperature→topk→采样→拼接 |
+| `GPT.configure_optimizers` | model.py | ~260 | 分两组：矩阵参数做weight decay，bias/LN不做 |
+| `F.cross_entropy` | PyTorch | — | 交叉熵：`-log(softmax(logits)[target])` |
+| `F.softmax` | PyTorch | — | `exp(x)/sum(exp(x))`，把任意向量变成概率分布 |
+| `torch.multinomial` | PyTorch | — | 按概率采样，返回token索引 |
+| `torch.tril` | PyTorch | — | 下三角矩阵，用于causal mask |
+
+## 附录 E：学完有什么用
 
 ### 写在简历上
 
@@ -894,13 +930,5 @@ handwrite-gpt/
 ├── kv_cache.py       # 临摹题1：KV Cache 推理
 └── test_all.py       # 跑通以上所有模块的正确性验证
 ```
-
-### 什么时候做
-
-| 题 | 时机 | 优先级 |
-|----|------|:--:|
-| 白板 1-2 | **今晚**夜班，精读完第 4-6 章后立刻手搓 | 🔴 |
-| 白板 3 | 明天白天 | 🟡 |
-| 临摹 1 | 周末，读完第 8 章后 | 🟢 |
 
 > 面试官问的不是 "你看过 nanoGPT 吗"，而是 **"你能在白板上写出 Attention 吗"**。这 4 道题做完，面试时直接默写。
